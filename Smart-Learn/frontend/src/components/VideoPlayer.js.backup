@@ -1,0 +1,1611 @@
+// import { useEffect, useRef, useState } from 'react';
+// import { useParams } from 'react-router-dom';
+// import YouTube from 'react-youtube';
+// import './Quiz.css'; // ✅ ADD THIS LINE
+// import styles from './VideoPlayer.module.css';
+
+// import {
+//   FaCheckCircle,
+//   FaChevronRight,
+//   FaClosedCaptioning,
+//   FaCompress,
+//   FaExpand,
+//   FaLock,
+//   FaPause,
+//   FaPlay,
+//   FaSpinner,
+//   FaTimesCircle,
+//   FaVolumeMute,
+//   FaVolumeUp
+// } from 'react-icons/fa';
+// import Chatbot from './chatbot';
+// // import styles from './VideoPlayer.module.css';
+
+// const VideoPlayer = () => {
+//   const { id: videoId } = useParams();
+  
+//   const [transcribingSegments, setTranscribingSegments] = useState(new Set());
+//   // Video state
+//   const [videoData, setVideoData] = useState(null);
+//   const [currentSegment, setCurrentSegment] = useState(0);
+//   const [segments, setSegments] = useState([]);
+//   const [isPlaying, setIsPlaying] = useState(false);
+//   const [currentTime, setCurrentTime] = useState(0);
+//   const [volume, setVolume] = useState(50);
+//   const [isMuted, setIsMuted] = useState(false);
+//   const [isFullscreen, setIsFullscreen] = useState(false);
+//   const [showControls, setShowControls] = useState(true);
+  
+//   // Transcription state
+//   const [transcription, setTranscription] = useState('');
+//   const [showTranscription, setShowTranscription] = useState(false);
+//   const [isLoadingTranscription, setIsLoadingTranscription] = useState(false);
+//   const [allTranscriptions, setAllTranscriptions] = useState('');
+
+  
+//   // Quiz state
+//   const [showQuiz, setShowQuiz] = useState(false);
+//   const [quizQuestions, setQuizQuestions] = useState([]);
+//   const [quizAnswers, setQuizAnswers] = useState({});
+//   const [isLoadingQuiz, setIsLoadingQuiz] = useState(false);
+//   const [quizSubmitted, setQuizSubmitted] = useState(false);
+//   const [quizScore, setQuizScore] = useState(0);
+//   const [quizPassed, setQuizPassed] = useState(false);
+//   const [quizAttempts, setQuizAttempts] = useState(0);
+//   const [quizBestScore, setQuizBestScore] = useState(0);
+//   const [quizStartTime, setQuizStartTime] = useState(null);
+
+  
+//   // Loading and error states
+//   const [isLoading, setIsLoading] = useState(true);
+//   const [error, setError] = useState('');
+  
+//   // Refs
+//   const playerRef = useRef(null);
+//   const containerRef = useRef(null);
+//   const controlsTimeoutRef = useRef(null);
+
+//   // YouTube player options
+//   const youtubeOpts = {
+//     height: '100%',
+//     width: '100%',
+//     playerVars: {
+//       autoplay: 0,
+//       controls: 0,
+//       modestbranding: 1,
+//       rel: 0,
+//       showinfo: 0,
+//       fs: 0
+//     }
+//   };
+
+//   // FIXED: Calculate 10-minute segments consistently
+//   const calculateSegmentDivision = (duration) => {
+//     const durationInMinutes = duration / 60;
+    
+//     // Videos less than 5 minutes = 1 segment
+//     if (durationInMinutes < 5) {
+//       return 1;
+//     }
+    
+//     // All other videos = 10-minute segments
+//     return Math.ceil(durationInMinutes / 10);
+//   };
+
+
+
+
+//   // Fetch video data on mount
+//   useEffect(() => {
+//     if (videoId) {
+//       fetchVideoData();
+//     }
+//   }, [videoId]);
+
+//   // Add a SEPARATE useEffect for transcription trigger
+//   useEffect(() => {
+//     if (videoId && currentSegment !== undefined) {
+//       console.log(`🎬 Starting transcription for segment ${currentSegment}...`);
+//       triggerSegmentTranscription(currentSegment);
+//     }
+//   }, [currentSegment]);
+
+
+//   // Fetch video data from backend
+//   const fetchVideoData = async () => {
+//     setIsLoading(true);
+//     setError('');
+
+//     try {
+//       const token = localStorage.getItem('token');
+//       const response = await fetch(`http://localhost:5000/api/videos/${videoId}`, {
+//         headers: {
+//           'Authorization': `Bearer ${token}`,
+//           'Content-Type': 'application/json'
+//         }
+//       });
+
+//       if (!response.ok) {
+//         throw new Error('Failed to load video');
+//       }
+
+//       const data = await response.json();
+//       setVideoData(data);
+      
+//       const numSegments = calculateSegmentDivision(data.duration);
+//       const segmentDuration = data.duration / numSegments;
+//       const segmentList = [];
+      
+//       for (let i = 0; i < numSegments; i++) {
+//         segmentList.push({
+//           index: i,
+//           startTime: Math.floor(i * segmentDuration),
+//           endTime: Math.floor(Math.min((i + 1) * segmentDuration, data.duration)),
+//           completed: data.progress?.completedSegments?.includes(i) || false,
+//           quizPassed: data.progress?.passedQuizzes?.includes(i) || false
+//         });
+//       }
+      
+//       setSegments(segmentList);
+//       setCurrentSegment(data.progress?.currentSegment || 0);
+
+//       console.log(`✅ Video loaded: ${numSegments} segments, currently at segment ${data.progress?.currentSegment || 0}`);
+//       // ✅ NEW: Fetch transcriptions for chatbot
+//       fetchAllTranscriptions();
+
+//     } catch (err) {
+//       console.error('Video fetch error:', err);
+//       setError('Failed to load video. Please try again.');
+//     } finally {
+//       setIsLoading(false);
+//     }
+//   };
+
+
+// // Fetch all segment transcriptions for chatbot
+// const fetchAllTranscriptions = async () => {
+//   try {
+//     const token = localStorage.getItem('token');
+//     const response = await fetch(`http://localhost:5000/api/videos/${videoId}`, {
+//       headers: { 'Authorization': `Bearer ${token}` }
+//     });
+
+//     if (response.ok) {
+//       const data = await response.json();
+      
+//       // Combine all completed segment transcriptions
+//       if (data.segmentTranscriptions && data.segmentTranscriptions.length > 0) {
+//         const completedTranscriptions = data.segmentTranscriptions
+//           .filter(seg => seg.status === 'completed' && seg.transcription)
+//           .sort((a, b) => a.segment - b.segment)
+//           .map(seg => seg.transcription)
+//           .join('\n\n');
+        
+//         if (completedTranscriptions) {
+//           setAllTranscriptions(completedTranscriptions);
+//           console.log(`📝 Loaded ${data.segmentTranscriptions.length} segment transcriptions for chatbot`);
+//         }
+//       }
+//     }
+//   } catch (error) {
+//     console.error('Error fetching transcriptions:', error);
+//   }
+// };
+
+
+
+
+// // Update the function
+// const triggerSegmentTranscription = async (segmentNumber) => {
+//   // ✅ Debug logs FIRST (before any checks)
+//   console.log(`🔧 DEBUG: triggerSegmentTranscription called`);
+//   console.log(`   videoId: ${videoId}`);
+//   console.log(`   segmentNumber: ${segmentNumber}`);
+//   console.log(`   transcribingSegments:`, Array.from(transcribingSegments));
+  
+//   // ✅ Check if already transcribing
+//   if (transcribingSegments.has(segmentNumber)) {
+//     console.log(`⚠️ Segment ${segmentNumber} already being transcribed, skipping duplicate`);
+//     return;
+//   }
+
+//   try {
+//     // Mark as transcribing
+//     setTranscribingSegments(prev => new Set(prev).add(segmentNumber));
+    
+//     console.log(`🎙️ Triggering transcription for segment ${segmentNumber}...`);
+    
+//     const token = localStorage.getItem('token');
+//     const response = await fetch(
+//       `http://localhost:5000/api/videos/${videoId}/segment-transcription?segment=${segmentNumber}`,
+//       {
+//         headers: {
+//           'Authorization': `Bearer ${token}`
+//         }
+//       }
+//     );
+
+//     if (response.ok) {
+//       const data = await response.json();
+//       console.log(`✅ Segment ${segmentNumber} transcription ${data.cached ? 'cached' : 'completed'}`);
+//       return data;
+//     } else {
+//       const errorData = await response.json();
+//       console.error(`❌ Segment transcription failed:`, errorData.message);
+//     }
+//   } catch (error) {
+//     console.error('Segment transcription error:', error);
+//   } finally {
+//     // Remove from transcribing set after delay
+//     setTimeout(() => {
+//       setTranscribingSegments(prev => {
+//         const newSet = new Set(prev);
+//         newSet.delete(segmentNumber);
+//         return newSet;
+//       });
+//     }, 3000);
+//   }
+// };
+
+
+//   // Handle YouTube player ready
+//   const onPlayerReady = (event) => {
+//     playerRef.current = event.target;
+//     if (segments[currentSegment]) {
+//       playerRef.current.seekTo(segments[currentSegment].startTime);
+//       console.log(`▶️ Starting at segment ${currentSegment}: ${segments[currentSegment].startTime}s`);
+//     }
+//   };
+
+//   // Handle YouTube player state change
+//   const onPlayerStateChange = (event) => {
+//     setIsPlaying(event.data === 1);
+//   };
+
+//   // FIXED: Monitor video time with proper segment boundaries
+//   useEffect(() => {
+//     const interval = setInterval(() => {
+//       if (playerRef.current && isPlaying) {
+//         const currentSeg = segments[currentSegment];
+//         if (!currentSeg) return;
+
+//         const time = playerRef.current.getCurrentTime();
+//         setCurrentTime(time);
+
+//         // CRITICAL FIX: Pause 2 seconds before end to show quiz
+//         if (time >= currentSeg.endTime - 2) {
+//           playerRef.current.pauseVideo();
+//           setIsPlaying(false);
+//           console.log(`⏸️ Segment ${currentSegment} ended at ${time.toFixed(1)}s`);
+//           handleSegmentEnd();
+//         }
+//       }
+//     }, 1000); // Check every 1 second for better accuracy
+
+//     return () => clearInterval(interval);
+//   }, [isPlaying, currentSegment, segments]);
+
+//   // Handle segment end - show quiz
+// const handleSegmentEnd = () => {
+//   const currentSeg = segments[currentSegment];
+  
+//   if (!currentSeg.quizPassed) {
+//     console.log(`📝 Loading quiz for segment ${currentSegment}...`);
+//     loadQuiz(); // ✅ Directly call loadQuiz
+//   } else {
+//     console.log(`✅ Segment ${currentSegment} already passed, skipping quiz`);
+//   }
+// };
+
+
+
+
+//   // Load quiz from backend
+// const loadQuiz = async () => {
+//   setIsLoadingQuiz(true);
+//   setShowQuiz(true);
+//   setQuizStartTime(Date.now());
+
+//   try {
+//     console.log(`📝 Loading quiz for segment ${currentSegment}...`);
+
+//     const token = localStorage.getItem('token');
+    
+//     // Load quiz directly (no transcription checking)
+//     const response = await fetch(`http://localhost:5000/api/videos/${videoId}/quiz/${currentSegment}`, {
+//       headers: {
+//         'Authorization': `Bearer ${token}`,
+//         'Content-Type': 'application/json'
+//       }
+//     });
+
+//     if (!response.ok) {
+//       const errorData = await response.json();
+//       throw new Error(errorData.message || 'Failed to load quiz');
+//     }
+
+//     const data = await response.json();
+    
+//     console.log(`📥 Quiz API response:`, data);
+    
+//     if (!data.questions || data.questions.length === 0) {
+//       throw new Error('Quiz has no questions. Transcription may still be in progress.');
+//     }
+
+//     setQuizQuestions(data.questions);
+//     setQuizAnswers({});
+//     setQuizSubmitted(false);
+//     setQuizAttempts(data.totalAttempts || 0);
+//     setQuizBestScore(data.bestScore || 0);
+
+//     console.log(`📋 Quiz loaded successfully: ${data.questions.length} questions`);
+
+//   } catch (err) {
+//     console.error('Quiz load error:', err);
+//     alert(err.message || 'Failed to load quiz. The transcription may still be processing. Please try again in a moment.');
+//     setShowQuiz(false);
+//   } finally {
+//     setIsLoadingQuiz(false);
+//   }
+// };
+
+
+
+
+
+//   // Handle quiz answer change
+//   const handleQuizAnswerChange = (questionIndex, answerIndex) => {
+//     setQuizAnswers(prev => ({
+//       ...prev,
+//       [questionIndex]: answerIndex
+//     }));
+//   };
+
+// // Submit quiz
+// const handleQuizSubmit = async () => {
+//   if (Object.keys(quizAnswers).length !== quizQuestions.length) {
+//     alert('Please answer all questions before submitting');
+//     return;
+//   }
+
+//   setQuizSubmitted(true);
+
+//   const timeTaken = quizStartTime ? Math.floor((Date.now() - quizStartTime) / 1000) : 0;
+
+//   try {
+//     const token = localStorage.getItem('token');
+    
+//     const answersArray = quizQuestions.map((_, index) => quizAnswers[index]);
+    
+//     console.log('📤 Submitting quiz answers:', answersArray);
+    
+//     const response = await fetch(`http://localhost:5000/api/videos/${videoId}/quiz/${currentSegment}/submit`, {
+//       method: 'POST',
+//       headers: {
+//         'Authorization': `Bearer ${token}`,
+//         'Content-Type': 'application/json'
+//       },
+//       body: JSON.stringify({ 
+//         answers: answersArray,
+//         timeTaken 
+//       })
+//     });
+
+//     if (!response.ok) {
+//       throw new Error('Failed to submit quiz');
+//     }
+
+//     const data = await response.json();
+//     setQuizScore(data.score);
+//     setQuizPassed(data.passed);
+//     setQuizAttempts(data.attempts);
+//     setQuizBestScore(data.bestScore);
+
+//     console.log(`✅ Quiz submitted: Score ${data.score}%, Passed: ${data.passed}, Attempts: ${data.attempts}`);
+
+//     if (data.passed) {
+//       const updatedSegments = [...segments];
+//       updatedSegments[currentSegment].quizPassed = true;
+//       updatedSegments[currentSegment].completed = true;
+//       setSegments(updatedSegments);
+      
+//       // ✅ No preloading - will transcribe when user starts next segment
+//     }
+
+//   } catch (err) {
+//     console.error('Quiz submit error:', err);
+//     alert('Failed to submit quiz. Please try again.');
+//   }
+// };
+
+
+//   // Move to next segment
+//   const handleNextSegment = () => {
+//     if (currentSegment < segments.length - 1) {
+//       const nextSegment = currentSegment + 1;
+//       console.log(`➡️ Moving to segment ${nextSegment}`);
+      
+//       setCurrentSegment(nextSegment);
+//       setShowQuiz(false);
+//       setQuizSubmitted(false);
+      
+//       if (playerRef.current) {
+//         playerRef.current.seekTo(segments[nextSegment].startTime);
+//         playerRef.current.playVideo();
+//         setIsPlaying(true);
+//       }
+//       // ✅ NEW: Refresh transcriptions for chatbot
+//       fetchAllTranscriptions();
+//     } else {
+//       console.log(`🎉 Video completed!`);
+//       alert('Congratulations! You have completed this video.');
+//     }
+//   };
+
+//   // Navigate to specific segment
+//   const goToSegment = (segmentIndex) => {
+//     const targetSegment = segments[segmentIndex];
+    
+//     // Check if user can access this segment
+//     if (segmentIndex > currentSegment && !targetSegment.quizPassed) {
+//       alert('Please complete the current segment quiz before proceeding.');
+//       return;
+//     }
+    
+//     console.log(`🎯 Jumping to segment ${segmentIndex}`);
+//     setCurrentSegment(segmentIndex);
+//     setShowQuiz(false);
+//     setQuizSubmitted(false);
+    
+//     if (playerRef.current) {
+//       playerRef.current.seekTo(targetSegment.startTime);
+//     }
+//   };
+
+//   // Load transcription from backend
+//   const loadTranscription = async () => {
+//     if (transcription) {
+//       setShowTranscription(!showTranscription);
+//       return;
+//     }
+
+//     setIsLoadingTranscription(true);
+//     setShowTranscription(true);
+
+//     try {
+//       const token = localStorage.getItem('token');
+//       const response = await fetch(`http://localhost:5000/api/videos/${videoId}/transcription`, {
+//         headers: {
+//           'Authorization': `Bearer ${token}`,
+//           'Content-Type': 'application/json'
+//         }
+//       });
+
+//       if (!response.ok) {
+//         throw new Error('Failed to load transcription');
+//       }
+
+//       const data = await response.json();
+//       setTranscription(data.transcription);
+
+//     } catch (err) {
+//       console.error('Transcription error:', err);
+//       setTranscription('Failed to load transcription. Please try again later.');
+//     } finally {
+//       setIsLoadingTranscription(false);
+//     }
+//   };
+
+//   // Play/Pause toggle
+//   const togglePlayPause = () => {
+//     if (playerRef.current) {
+//       if (isPlaying) {
+//         playerRef.current.pauseVideo();
+//       } else {
+//         playerRef.current.playVideo();
+//       }
+//     }
+//   };
+
+//   // Toggle fullscreen
+//   const toggleFullscreen = () => {
+//     if (!isFullscreen) {
+//       containerRef.current?.requestFullscreen();
+//     } else {
+//       document.exitFullscreen();
+//     }
+//     setIsFullscreen(!isFullscreen);
+//   };
+
+//   // Toggle mute
+//   const toggleMute = () => {
+//     if (playerRef.current) {
+//       if (isMuted) {
+//         playerRef.current.unMute();
+//       } else {
+//         playerRef.current.mute();
+//       }
+//       setIsMuted(!isMuted);
+//     }
+//   };
+
+//   // Handle volume change
+//   const handleVolumeChange = (e) => {
+//     const newVolume = parseFloat(e.target.value);
+//     setVolume(newVolume);
+//     if (playerRef.current) {
+//       playerRef.current.setVolume(newVolume);
+//     }
+//   };
+
+//   // Handle progress bar click
+//   const handleProgressClick = (e) => {
+//     if (!playerRef.current) return;
+    
+//     const currentSeg = segments[currentSegment];
+//     if (!currentSeg) return;
+    
+//     const progressBar = e.currentTarget;
+//     const rect = progressBar.getBoundingClientRect();
+//     const clickX = e.clientX - rect.left;
+//     const percentage = clickX / rect.width;
+    
+//     const segmentDuration = currentSeg.endTime - currentSeg.startTime;
+//     const newTime = currentSeg.startTime + (segmentDuration * percentage);
+    
+//     playerRef.current.seekTo(newTime);
+//     setCurrentTime(newTime);
+//   };
+
+//   // Format time
+//   const formatTime = (seconds) => {
+//     const mins = Math.floor(seconds / 60);
+//     const secs = Math.floor(seconds % 60);
+//     return `${mins}:${secs.toString().padStart(2, '0')}`;
+//   };
+
+//   // Show/hide controls
+//   const handleMouseMove = () => {
+//     setShowControls(true);
+//     clearTimeout(controlsTimeoutRef.current);
+//     controlsTimeoutRef.current = setTimeout(() => {
+//       if (isPlaying) setShowControls(false);
+//     }, 3000);
+//   };
+
+//   if (isLoading) {
+//     return (
+//       <div className={styles.loadingContainer}>
+//         <FaSpinner className={styles.spinner} />
+//         <p>Loading video...</p>
+//       </div>
+//     );
+//   }
+
+//   if (error) {
+//     return (
+//       <div className={styles.errorContainer}>
+//         <FaTimesCircle className={styles.errorIcon} />
+//         <h2>{error}</h2>
+//         <button onClick={() => window.location.href = '/dashboard'} className={styles.retryButton}>
+//           Back to Dashboard
+//         </button>
+//       </div>
+//     );
+//   }
+
+//   const currentSeg = segments[currentSegment];
+
+//   return (
+//     <div className={styles.videoPlayerPage}>
+//       <div 
+//         className={styles.videoContainer}
+//         ref={containerRef}
+//         onMouseMove={handleMouseMove}
+//       >
+//         <YouTube
+//           videoId={videoData?.youtubeId}
+//           opts={youtubeOpts}
+//           onReady={onPlayerReady}
+//           onStateChange={onPlayerStateChange}
+//           className={styles.youtubePlayer}
+//         />
+
+//         <div className={`${styles.controls} ${showControls ? styles.visible : ''}`}>
+//           <div className={styles.progressBar} onClick={handleProgressClick}>
+//             <div 
+//               className={styles.progressFill}
+//               style={{ 
+//                 width: currentSeg 
+//                   ? `${((currentTime - currentSeg.startTime) / (currentSeg.endTime - currentSeg.startTime)) * 100}%` 
+//                   : '0%'
+//               }}
+//             />
+//           </div>
+
+//           <div className={styles.controlsRow}>
+//             <button onClick={togglePlayPause} className={styles.controlButton}>
+//               {isPlaying ? <FaPause /> : <FaPlay />}
+//             </button>
+
+//             <span className={styles.time}>
+//               {formatTime(currentTime)} / {formatTime(currentSeg?.endTime || 0)}
+//             </span>
+
+//             <div className={styles.volumeControl}>
+//               <button onClick={toggleMute} className={styles.controlButton}>
+//                 {isMuted ? <FaVolumeMute /> : <FaVolumeUp />}
+//               </button>
+//               <input
+//                 type="range"
+//                 min="0"
+//                 max="100"
+//                 step="1"
+//                 value={volume}
+//                 onChange={handleVolumeChange}
+//                 className={styles.volumeSlider}
+//               />
+//             </div>
+
+//             <button onClick={loadTranscription} className={styles.controlButton}>
+//               <FaClosedCaptioning />
+//             </button>
+
+//             <button onClick={toggleFullscreen} className={styles.controlButton}>
+//               {isFullscreen ? <FaCompress /> : <FaExpand />}
+//             </button>
+//           </div>
+//         </div>
+
+//         <div className={styles.segmentInfo}>
+//           <span>Segment {currentSegment + 1} of {segments.length}</span>
+//         </div>
+//       </div>
+
+//       {/* Segment Navigation */}
+//       <div className={styles.segmentNav}>
+//         <h3>Video Segments ({segments.filter(s => s.completed).length}/{segments.length} completed)</h3>
+//         <div className={styles.segmentGrid}>
+//           {segments.map((seg, index) => {
+//             const isLocked = index > currentSegment && !seg.quizPassed;
+//             const isAccessible = seg.completed || index <= currentSegment;
+            
+//             return (
+//               <div
+//                 key={index}
+//                 className={`${styles.segmentCard} ${index === currentSegment ? styles.active : ''} ${seg.completed ? styles.completed : ''} ${isLocked ? styles.locked : ''}`}
+//                 onClick={() => isAccessible && goToSegment(index)}
+//                 style={{ cursor: isAccessible ? 'pointer' : 'not-allowed' }}
+//               >
+//                 <span className={styles.segmentNumber}>{index + 1}</span>
+//                 {seg.completed && <FaCheckCircle className={styles.checkIcon} />}
+//                 {isLocked && <FaLock className={styles.lockIcon} />}
+//                 <span className={styles.segmentTime}>
+//                   {formatTime(seg.startTime)} - {formatTime(seg.endTime)}
+//                 </span>
+//               </div>
+//             );
+//           })}
+//         </div>
+//       </div>
+
+//       {/* Transcription Panel */}
+//       {showTranscription && (
+//         <div className={styles.transcriptionPanel}>
+//           <div className={styles.panelHeader}>
+//             <h3>Video Transcription</h3>
+//             <button onClick={() => setShowTranscription(false)}>×</button>
+//           </div>
+//           <div className={styles.panelContent}>
+//             {isLoadingTranscription ? (
+//               <div className={styles.loading}>
+//                 <FaSpinner className={styles.spinner} />
+//                 <p>Generating transcription...</p>
+//               </div>
+//             ) : (
+//               <pre className={styles.transcriptionText}>{transcription}</pre>
+//             )}
+//           </div>
+//         </div>
+//       )}
+
+//       {/* Quiz Modal */}
+// {showQuiz && (
+//   <div className="quiz-overlay">
+//     <div className="quiz-modal">
+//       <h2>Segment {currentSegment + 1} Quiz</h2>
+//       <p className="quiz-subtitle">
+//         Answer all questions correctly (70%+) to proceed to the next segment
+//       </p>
+
+// {/* Simple loading spinner */}
+// {isLoadingQuiz && quizQuestions.length === 0 && (
+//   <div className={styles.loading}>
+//     <FaSpinner className={styles.spinner} />
+//     <p>Loading quiz questions...</p>
+//   </div>
+// )}
+
+
+//       {/* Show quiz questions when ready */}
+//       {!isLoadingQuiz && quizQuestions.length > 0 && (
+//         <>
+//           {quizQuestions.map((question, index) => (
+//             <div key={index} className="quiz-question">
+//               <h3>Question {index + 1}</h3>
+//               <p>{question.question}</p>
+//               <div className="quiz-options">
+//                 {question.options.map((option, optIndex) => (
+//                   <label key={optIndex} className="quiz-option">
+//                     <input
+//                       type="radio"
+//                       name={`question-${index}`}
+//                       value={optIndex}
+//                       checked={quizAnswers[index] === optIndex}
+//                       // onChange={() => handleQuizAnswer(index, optIndex)}
+//                       onChange={() => handleQuizAnswerChange(index, optIndex)}
+//                       disabled={quizSubmitted}
+//                     />
+//                     <span>{option}</span>
+//                   </label>
+//                 ))}
+//               </div>
+//             </div>
+//           ))}
+
+//           {!quizSubmitted && (
+//             <button 
+//               className="submit-quiz-btn" 
+//               onClick={handleQuizSubmit}
+//             >
+//               Submit Quiz
+//             </button>
+//           )}
+
+//                 {quizSubmitted && (
+//                   <div className={`quiz-result ${quizPassed ? 'passed' : 'failed'}`}>
+//                     <div className="result-icon">
+//                       {quizPassed ? '✅' : '❌'}
+//                     </div>
+//                     <h3>{quizPassed ? 'Congratulations!' : 'Try Again'}</h3>
+//                     <p>You scored {quizScore}%. You need 70% to pass.</p>
+//                     <p>Attempt #{quizAttempts} | Best: {quizBestScore}%</p>
+
+//                     {quizPassed ? (
+//                       // ✅ PASSED: Show next segment or complete button
+//                       currentSegment < segments.length - 1 ? (
+//                         <button
+//                           className="submit-quiz-btn"
+//                           onClick={handleNextSegment}
+//                         >
+//                           Next Segment <FaChevronRight />
+//                         </button>
+//                       ) : (
+//                         <button
+//                           className="submit-quiz-btn"
+//                           onClick={() => window.location.href = '/dashboard'}
+//                         >
+//                           Back to Dashboard
+//                         </button>
+//                       )
+//                     ) : (
+//                       // ❌ FAILED: Show retry button
+//                       <button
+//                         className="submit-quiz-btn"
+//                         onClick={() => window.location.reload()}
+//                       >
+//                         Retry Quiz
+//                       </button>
+//                     )}
+//                   </div>
+//                 )}
+
+//         </>
+//       )}
+//     </div>
+//   </div>
+// )}
+
+      
+//       {/* Chatbot - Always show if video loaded */}
+//       {videoData && (
+//         <Chatbot
+//           videoId={videoId}
+//           transcription={allTranscriptions || 'Transcription will be available after watching the video segment.'}
+//           videoTitle={videoData.title}
+//         />
+//       )}
+
+//     </div>
+//   );
+// };
+
+// export default VideoPlayer;
+
+
+
+
+
+import { useEffect, useRef, useState } from 'react';
+import { useParams } from 'react-router-dom';
+import YouTube from 'react-youtube';
+import './Quiz.css'; // ✅ ADD THIS LINE
+import styles from './VideoPlayer.module.css';
+
+import {
+  FaCheckCircle,
+  FaChevronRight,
+  FaClosedCaptioning,
+  FaCompress,
+  FaExpand,
+  FaLock,
+  FaPause,
+  FaPlay,
+  FaSpinner,
+  FaTimesCircle,
+  FaVolumeMute,
+  FaVolumeUp
+} from 'react-icons/fa';
+import Chatbot from './chatbot';
+// import styles from './VideoPlayer.module.css';
+
+const VideoPlayer = () => {
+  const { id: videoId } = useParams();
+  
+  const [transcribingSegments, setTranscribingSegments] = useState(new Set());
+  // Video state
+  const [videoData, setVideoData] = useState(null);
+  const [currentSegment, setCurrentSegment] = useState(0);
+  const [segments, setSegments] = useState([]);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [volume, setVolume] = useState(50);
+  const [isMuted, setIsMuted] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [showControls, setShowControls] = useState(true);
+  
+  // Transcription state
+  const [transcription, setTranscription] = useState('');
+  const [showTranscription, setShowTranscription] = useState(false);
+  const [isLoadingTranscription, setIsLoadingTranscription] = useState(false);
+  
+  // Quiz state
+  const [showQuiz, setShowQuiz] = useState(false);
+  const [quizQuestions, setQuizQuestions] = useState([]);
+  const [quizAnswers, setQuizAnswers] = useState({});
+  const [isLoadingQuiz, setIsLoadingQuiz] = useState(false);
+  const [quizSubmitted, setQuizSubmitted] = useState(false);
+  const [quizScore, setQuizScore] = useState(0);
+  const [quizPassed, setQuizPassed] = useState(false);
+  const [quizAttempts, setQuizAttempts] = useState(0);
+  const [quizBestScore, setQuizBestScore] = useState(0);
+  const [quizStartTime, setQuizStartTime] = useState(null);
+
+  
+  // Loading and error states
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState('');
+  
+  // Refs
+  const playerRef = useRef(null);
+  const containerRef = useRef(null);
+  const controlsTimeoutRef = useRef(null);
+
+  // YouTube player options
+  const youtubeOpts = {
+    height: '100%',
+    width: '100%',
+    playerVars: {
+      autoplay: 0,
+      controls: 0,
+      modestbranding: 1,
+      rel: 0,
+      showinfo: 0,
+      fs: 0
+    }
+  };
+
+  // FIXED: Calculate 10-minute segments consistently
+  const calculateSegmentDivision = (duration) => {
+    const durationInMinutes = duration / 60;
+    
+    // Videos less than 5 minutes = 1 segment
+    if (durationInMinutes < 5) {
+      return 1;
+    }
+    
+    // All other videos = 10-minute segments
+    return Math.ceil(durationInMinutes / 10);
+  };
+
+
+
+
+  // Fetch video data on mount
+  useEffect(() => {
+    if (videoId) {
+      fetchVideoData();
+    }
+  }, [videoId]);
+
+  // Add a SEPARATE useEffect for transcription trigger
+  useEffect(() => {
+    if (videoId && currentSegment !== undefined) {
+      console.log(`🎬 Starting transcription for segment ${currentSegment}...`);
+      triggerSegmentTranscription(currentSegment);
+    }
+  }, [currentSegment]);
+
+
+  // Fetch video data from backend
+  const fetchVideoData = async () => {
+    setIsLoading(true);
+    setError('');
+
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch(`http://localhost:5000/api/videos/${videoId}`, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to load video');
+      }
+
+      const data = await response.json();
+      setVideoData(data);
+      
+      const numSegments = calculateSegmentDivision(data.duration);
+      const segmentDuration = data.duration / numSegments;
+      const segmentList = [];
+      
+      for (let i = 0; i < numSegments; i++) {
+        segmentList.push({
+          index: i,
+          startTime: Math.floor(i * segmentDuration),
+          endTime: Math.floor(Math.min((i + 1) * segmentDuration, data.duration)),
+          completed: data.progress?.completedSegments?.includes(i) || false,
+          quizPassed: data.progress?.passedQuizzes?.includes(i) || false
+        });
+      }
+      
+      setSegments(segmentList);
+      setCurrentSegment(data.progress?.currentSegment || 0);
+
+      console.log(`✅ Video loaded: ${numSegments} segments, currently at segment ${data.progress?.currentSegment || 0}`);
+
+    } catch (err) {
+      console.error('Video fetch error:', err);
+      setError('Failed to load video. Please try again.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+
+// Update the function
+const triggerSegmentTranscription = async (segmentNumber) => {
+  // ✅ Debug logs FIRST (before any checks)
+  console.log(`🔧 DEBUG: triggerSegmentTranscription called`);
+  console.log(`   videoId: ${videoId}`);
+  console.log(`   segmentNumber: ${segmentNumber}`);
+  console.log(`   transcribingSegments:`, Array.from(transcribingSegments));
+  
+  // ✅ Check if already transcribing
+  if (transcribingSegments.has(segmentNumber)) {
+    console.log(`⚠️ Segment ${segmentNumber} already being transcribed, skipping duplicate`);
+    return;
+  }
+
+  try {
+    // Mark as transcribing
+    setTranscribingSegments(prev => new Set(prev).add(segmentNumber));
+    
+    console.log(`🎙️ Triggering transcription for segment ${segmentNumber}...`);
+    
+    const token = localStorage.getItem('token');
+    const response = await fetch(
+      `http://localhost:5000/api/videos/${videoId}/segment-transcription?segment=${segmentNumber}`,
+      {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      }
+    );
+
+    if (response.ok) {
+      const data = await response.json();
+      console.log(`✅ Segment ${segmentNumber} transcription ${data.cached ? 'cached' : 'completed'}`);
+      return data;
+    } else {
+      const errorData = await response.json();
+      console.error(`❌ Segment transcription failed:`, errorData.message);
+    }
+  } catch (error) {
+    console.error('Segment transcription error:', error);
+  } finally {
+    // Remove from transcribing set after delay
+    setTimeout(() => {
+      setTranscribingSegments(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(segmentNumber);
+        return newSet;
+      });
+    }, 3000);
+  }
+};
+
+
+  // Handle YouTube player ready
+  const onPlayerReady = (event) => {
+    playerRef.current = event.target;
+    if (segments[currentSegment]) {
+      playerRef.current.seekTo(segments[currentSegment].startTime);
+      console.log(`▶️ Starting at segment ${currentSegment}: ${segments[currentSegment].startTime}s`);
+    }
+  };
+
+  // Handle YouTube player state change
+  const onPlayerStateChange = (event) => {
+    setIsPlaying(event.data === 1);
+  };
+
+  // FIXED: Monitor video time with proper segment boundaries
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (playerRef.current && isPlaying) {
+        const currentSeg = segments[currentSegment];
+        if (!currentSeg) return;
+
+        const time = playerRef.current.getCurrentTime();
+        setCurrentTime(time);
+
+        // CRITICAL FIX: Pause 2 seconds before end to show quiz
+        if (time >= currentSeg.endTime - 2) {
+          playerRef.current.pauseVideo();
+          setIsPlaying(false);
+          console.log(`⏸️ Segment ${currentSegment} ended at ${time.toFixed(1)}s`);
+          handleSegmentEnd();
+        }
+      }
+    }, 1000); // Check every 1 second for better accuracy
+
+    return () => clearInterval(interval);
+  }, [isPlaying, currentSegment, segments]);
+
+  // Handle segment end - show quiz
+const handleSegmentEnd = () => {
+  const currentSeg = segments[currentSegment];
+  
+  if (!currentSeg.quizPassed) {
+    console.log(`📝 Loading quiz for segment ${currentSegment}...`);
+    loadQuiz(); // ✅ Directly call loadQuiz
+  } else {
+    console.log(`✅ Segment ${currentSegment} already passed, skipping quiz`);
+  }
+};
+
+
+
+
+  // Load quiz from backend
+const loadQuiz = async () => {
+  setIsLoadingQuiz(true);
+  setShowQuiz(true);
+  setQuizStartTime(Date.now());
+
+  try {
+    console.log(`📝 Loading quiz for segment ${currentSegment}...`);
+
+    const token = localStorage.getItem('token');
+    
+    // Load quiz directly (no transcription checking)
+    const response = await fetch(`http://localhost:5000/api/videos/${videoId}/quiz/${currentSegment}`, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.message || 'Failed to load quiz');
+    }
+
+    const data = await response.json();
+    
+    console.log(`📥 Quiz API response:`, data);
+    
+    if (!data.questions || data.questions.length === 0) {
+      throw new Error('Quiz has no questions. Transcription may still be in progress.');
+    }
+
+    setQuizQuestions(data.questions);
+    setQuizAnswers({});
+    setQuizSubmitted(false);
+    setQuizAttempts(data.totalAttempts || 0);
+    setQuizBestScore(data.bestScore || 0);
+
+    console.log(`📋 Quiz loaded successfully: ${data.questions.length} questions`);
+
+  } catch (err) {
+    console.error('Quiz load error:', err);
+    alert(err.message || 'Failed to load quiz. The transcription may still be processing. Please try again in a moment.');
+    setShowQuiz(false);
+  } finally {
+    setIsLoadingQuiz(false);
+  }
+};
+
+
+
+
+
+  // Handle quiz answer change
+  const handleQuizAnswerChange = (questionIndex, answerIndex) => {
+    setQuizAnswers(prev => ({
+      ...prev,
+      [questionIndex]: answerIndex
+    }));
+  };
+
+// Submit quiz
+const handleQuizSubmit = async () => {
+  if (Object.keys(quizAnswers).length !== quizQuestions.length) {
+    alert('Please answer all questions before submitting');
+    return;
+  }
+
+  setQuizSubmitted(true);
+
+  const timeTaken = quizStartTime ? Math.floor((Date.now() - quizStartTime) / 1000) : 0;
+
+  try {
+    const token = localStorage.getItem('token');
+    
+    const answersArray = quizQuestions.map((_, index) => quizAnswers[index]);
+    
+    console.log('📤 Submitting quiz answers:', answersArray);
+    
+    const response = await fetch(`http://localhost:5000/api/videos/${videoId}/quiz/${currentSegment}/submit`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ 
+        answers: answersArray,
+        timeTaken 
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error('Failed to submit quiz');
+    }
+
+    const data = await response.json();
+    setQuizScore(data.score);
+    setQuizPassed(data.passed);
+    setQuizAttempts(data.attempts);
+    setQuizBestScore(data.bestScore);
+
+    console.log(`✅ Quiz submitted: Score ${data.score}%, Passed: ${data.passed}, Attempts: ${data.attempts}`);
+
+    if (data.passed) {
+      const updatedSegments = [...segments];
+      updatedSegments[currentSegment].quizPassed = true;
+      updatedSegments[currentSegment].completed = true;
+      setSegments(updatedSegments);
+      
+      // ✅ No preloading - will transcribe when user starts next segment
+    }
+
+  } catch (err) {
+    console.error('Quiz submit error:', err);
+    alert('Failed to submit quiz. Please try again.');
+  }
+};
+
+
+  // Move to next segment
+  const handleNextSegment = () => {
+    if (currentSegment < segments.length - 1) {
+      const nextSegment = currentSegment + 1;
+      console.log(`➡️ Moving to segment ${nextSegment}`);
+      
+      setCurrentSegment(nextSegment);
+      setShowQuiz(false);
+      setQuizSubmitted(false);
+      
+      if (playerRef.current) {
+        playerRef.current.seekTo(segments[nextSegment].startTime);
+        playerRef.current.playVideo();
+        setIsPlaying(true);
+      }
+    } else {
+      console.log(`🎉 Video completed!`);
+      alert('Congratulations! You have completed this video.');
+    }
+  };
+
+  // Navigate to specific segment
+  const goToSegment = (segmentIndex) => {
+    const targetSegment = segments[segmentIndex];
+    
+    // Check if user can access this segment
+    if (segmentIndex > currentSegment && !targetSegment.quizPassed) {
+      alert('Please complete the current segment quiz before proceeding.');
+      return;
+    }
+    
+    console.log(`🎯 Jumping to segment ${segmentIndex}`);
+    setCurrentSegment(segmentIndex);
+    setShowQuiz(false);
+    setQuizSubmitted(false);
+    
+    if (playerRef.current) {
+      playerRef.current.seekTo(targetSegment.startTime);
+    }
+  };
+
+  // Load transcription from backend
+  const loadTranscription = async () => {
+    if (transcription) {
+      setShowTranscription(!showTranscription);
+      return;
+    }
+
+    setIsLoadingTranscription(true);
+    setShowTranscription(true);
+
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch(`http://localhost:5000/api/videos/${videoId}/transcription`, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to load transcription');
+      }
+
+      const data = await response.json();
+      setTranscription(data.transcription);
+
+    } catch (err) {
+      console.error('Transcription error:', err);
+      setTranscription('Failed to load transcription. Please try again later.');
+    } finally {
+      setIsLoadingTranscription(false);
+    }
+  };
+
+  // Play/Pause toggle
+  const togglePlayPause = () => {
+    if (playerRef.current) {
+      if (isPlaying) {
+        playerRef.current.pauseVideo();
+      } else {
+        playerRef.current.playVideo();
+      }
+    }
+  };
+
+  // Toggle fullscreen
+  const toggleFullscreen = () => {
+    if (!isFullscreen) {
+      containerRef.current?.requestFullscreen();
+    } else {
+      document.exitFullscreen();
+    }
+    setIsFullscreen(!isFullscreen);
+  };
+
+  // Toggle mute
+  const toggleMute = () => {
+    if (playerRef.current) {
+      if (isMuted) {
+        playerRef.current.unMute();
+      } else {
+        playerRef.current.mute();
+      }
+      setIsMuted(!isMuted);
+    }
+  };
+
+  // Handle volume change
+  const handleVolumeChange = (e) => {
+    const newVolume = parseFloat(e.target.value);
+    setVolume(newVolume);
+    if (playerRef.current) {
+      playerRef.current.setVolume(newVolume);
+    }
+  };
+
+  // Handle progress bar click
+  const handleProgressClick = (e) => {
+    if (!playerRef.current) return;
+    
+    const currentSeg = segments[currentSegment];
+    if (!currentSeg) return;
+    
+    const progressBar = e.currentTarget;
+    const rect = progressBar.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
+    const percentage = clickX / rect.width;
+    
+    const segmentDuration = currentSeg.endTime - currentSeg.startTime;
+    const newTime = currentSeg.startTime + (segmentDuration * percentage);
+    
+    playerRef.current.seekTo(newTime);
+    setCurrentTime(newTime);
+  };
+
+  // Format time
+  const formatTime = (seconds) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  // Show/hide controls
+  const handleMouseMove = () => {
+    setShowControls(true);
+    clearTimeout(controlsTimeoutRef.current);
+    controlsTimeoutRef.current = setTimeout(() => {
+      if (isPlaying) setShowControls(false);
+    }, 3000);
+  };
+
+  if (isLoading) {
+    return (
+      <div className={styles.loadingContainer}>
+        <FaSpinner className={styles.spinner} />
+        <p>Loading video...</p>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className={styles.errorContainer}>
+        <FaTimesCircle className={styles.errorIcon} />
+        <h2>{error}</h2>
+        <button onClick={() => window.location.href = '/dashboard'} className={styles.retryButton}>
+          Back to Dashboard
+        </button>
+      </div>
+    );
+  }
+
+  const currentSeg = segments[currentSegment];
+
+  return (
+    <div className={styles.videoPlayerPage}>
+      <div 
+        className={styles.videoContainer}
+        ref={containerRef}
+        onMouseMove={handleMouseMove}
+      >
+        <YouTube
+          videoId={videoData?.youtubeId}
+          opts={youtubeOpts}
+          onReady={onPlayerReady}
+          onStateChange={onPlayerStateChange}
+          className={styles.youtubePlayer}
+        />
+
+        <div className={`${styles.controls} ${showControls ? styles.visible : ''}`}>
+          <div className={styles.progressBar} onClick={handleProgressClick}>
+            <div 
+              className={styles.progressFill}
+              style={{ 
+                width: currentSeg 
+                  ? `${((currentTime - currentSeg.startTime) / (currentSeg.endTime - currentSeg.startTime)) * 100}%` 
+                  : '0%'
+              }}
+            />
+          </div>
+
+          <div className={styles.controlsRow}>
+            <button onClick={togglePlayPause} className={styles.controlButton}>
+              {isPlaying ? <FaPause /> : <FaPlay />}
+            </button>
+
+            <span className={styles.time}>
+              {formatTime(currentTime)} / {formatTime(currentSeg?.endTime || 0)}
+            </span>
+
+            <div className={styles.volumeControl}>
+              <button onClick={toggleMute} className={styles.controlButton}>
+                {isMuted ? <FaVolumeMute /> : <FaVolumeUp />}
+              </button>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                step="1"
+                value={volume}
+                onChange={handleVolumeChange}
+                className={styles.volumeSlider}
+              />
+            </div>
+
+            <button onClick={loadTranscription} className={styles.controlButton}>
+              <FaClosedCaptioning />
+            </button>
+
+            <button onClick={toggleFullscreen} className={styles.controlButton}>
+              {isFullscreen ? <FaCompress /> : <FaExpand />}
+            </button>
+          </div>
+        </div>
+
+        <div className={styles.segmentInfo}>
+          <span>Segment {currentSegment + 1} of {segments.length}</span>
+        </div>
+      </div>
+
+      {/* Segment Navigation */}
+      <div className={styles.segmentNav}>
+        <h3>Video Segments ({segments.filter(s => s.completed).length}/{segments.length} completed)</h3>
+        <div className={styles.segmentGrid}>
+          {segments.map((seg, index) => {
+            const isLocked = index > currentSegment && !seg.quizPassed;
+            const isAccessible = seg.completed || index <= currentSegment;
+            
+            return (
+              <div
+                key={index}
+                className={`${styles.segmentCard} ${index === currentSegment ? styles.active : ''} ${seg.completed ? styles.completed : ''} ${isLocked ? styles.locked : ''}`}
+                onClick={() => isAccessible && goToSegment(index)}
+                style={{ cursor: isAccessible ? 'pointer' : 'not-allowed' }}
+              >
+                <span className={styles.segmentNumber}>{index + 1}</span>
+                {seg.completed && <FaCheckCircle className={styles.checkIcon} />}
+                {isLocked && <FaLock className={styles.lockIcon} />}
+                <span className={styles.segmentTime}>
+                  {formatTime(seg.startTime)} - {formatTime(seg.endTime)}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Transcription Panel */}
+      {showTranscription && (
+        <div className={styles.transcriptionPanel}>
+          <div className={styles.panelHeader}>
+            <h3>Video Transcription</h3>
+            <button onClick={() => setShowTranscription(false)}>×</button>
+          </div>
+          <div className={styles.panelContent}>
+            {isLoadingTranscription ? (
+              <div className={styles.loading}>
+                <FaSpinner className={styles.spinner} />
+                <p>Generating transcription...</p>
+              </div>
+            ) : (
+              <pre className={styles.transcriptionText}>{transcription}</pre>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Quiz Modal */}
+{showQuiz && (
+  <div className="quiz-overlay">
+    <div className="quiz-modal">
+      <h2>Segment {currentSegment + 1} Quiz</h2>
+      <p className="quiz-subtitle">
+        Answer all questions correctly (70%+) to proceed to the next segment
+      </p>
+
+{/* Simple loading spinner */}
+{isLoadingQuiz && quizQuestions.length === 0 && (
+  <div className={styles.loading}>
+    <FaSpinner className={styles.spinner} />
+    <p>Loading quiz questions...</p>
+  </div>
+)}
+
+
+      {/* Show quiz questions when ready */}
+      {!isLoadingQuiz && quizQuestions.length > 0 && (
+        <>
+          {quizQuestions.map((question, index) => (
+            <div key={index} className="quiz-question">
+              <h3>Question {index + 1}</h3>
+              <p>{question.question}</p>
+              <div className="quiz-options">
+                {question.options.map((option, optIndex) => (
+                  <label key={optIndex} className="quiz-option">
+                    <input
+                      type="radio"
+                      name={`question-${index}`}
+                      value={optIndex}
+                      checked={quizAnswers[index] === optIndex}
+                      // onChange={() => handleQuizAnswer(index, optIndex)}
+                      onChange={() => handleQuizAnswerChange(index, optIndex)}
+                      disabled={quizSubmitted}
+                    />
+                    <span>{option}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          ))}
+
+          {!quizSubmitted && (
+            <button 
+              className="submit-quiz-btn" 
+              onClick={handleQuizSubmit}
+            >
+              Submit Quiz
+            </button>
+          )}
+
+                {quizSubmitted && (
+                  <div className={`quiz-result ${quizPassed ? 'passed' : 'failed'}`}>
+                    <div className="result-icon">
+                      {quizPassed ? '✅' : '❌'}
+                    </div>
+                    <h3>{quizPassed ? 'Congratulations!' : 'Try Again'}</h3>
+                    <p>You scored {quizScore}%. You need 70% to pass.</p>
+                    <p>Attempt #{quizAttempts} | Best: {quizBestScore}%</p>
+
+                    {quizPassed ? (
+                      // ✅ PASSED: Show next segment or complete button
+                      currentSegment < segments.length - 1 ? (
+                        <button
+                          className="submit-quiz-btn"
+                          onClick={handleNextSegment}
+                        >
+                          Next Segment <FaChevronRight />
+                        </button>
+                      ) : (
+                        <button
+                          className="submit-quiz-btn"
+                          onClick={() => window.location.href = '/dashboard'}
+                        >
+                          Back to Dashboard
+                        </button>
+                      )
+                    ) : (
+                      // ❌ FAILED: Show retry button
+                      <button
+                        className="submit-quiz-btn"
+                        onClick={() => window.location.reload()}
+                      >
+                        Retry Quiz
+                      </button>
+                    )}
+                  </div>
+                )}
+
+        </>
+      )}
+    </div>
+  </div>
+)}
+
+      
+      {/* Chatbot */}
+      {videoData && transcription && (
+        <Chatbot 
+          videoId={videoId}
+          transcription={transcription}
+          videoTitle={videoData.title}
+        />
+      )}
+    </div>
+  );
+};
+
+export default VideoPlayer;

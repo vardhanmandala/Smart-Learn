@@ -1,0 +1,1494 @@
+const Video = require('../models/Video');
+const Quiz = require('../models/Quiz');
+const User = require('../models/User');
+const axios = require('axios');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { YoutubeTranscript } = require('youtube-transcript');
+const ytdl = require('@distube/ytdl-core');
+const { transcribeYouTubeVideo } = require('../services/whisperService'); // ← ADD THIS
+const { transcribeSegment } = require('../services/audioSegmentService');
+
+
+
+
+// Initialize Gemini API
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
+// Helper function to extract YouTube video ID
+const extractYoutubeId = (url) => {
+  const regex = /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/;
+  const match = url.match(regex);
+  return match ? match[1] : null;
+};
+
+// FIXED: Calculate segments - always use 10-minute segments
+const calculateSegments = (durationInSeconds) => {
+  const durationInMinutes = durationInSeconds / 60;
+  
+  if (durationInMinutes < 5) {
+    return 1;
+  }
+  
+  return Math.ceil(durationInMinutes / 10);
+};
+
+// Get YouTube video details
+
+// IMPROVED: Get YouTube video details with fallback methods
+
+const getYouTubeVideoDetails = async (videoId) => {
+  try {
+    console.log(`📹 Fetching video details for: ${videoId}`);
+    
+    // Method 1: Try @distube/ytdl-core
+    try {
+      const info = await ytdl.getInfo(`https://www.youtube.com/watch?v=${videoId}`);
+      
+      const details = {
+        title: info.videoDetails.title,
+        duration: parseInt(info.videoDetails.lengthSeconds),
+        thumbnail: info.videoDetails.thumbnails[info.videoDetails.thumbnails.length - 1].url,
+        hasCaption: info.player_response?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length > 0
+      };
+      
+      console.log(`✅ Video details retrieved successfully`);
+      console.log(`   Title: ${details.title}`);
+      console.log(`   Duration: ${Math.floor(details.duration/60)} mins (${details.duration}s)`);
+      console.log(`   Has Captions: ${details.hasCaption ? 'YES ✅' : 'NO ❌'}`);
+      
+      return details;
+      
+    } catch (ytdlError) {
+      console.log(`⚠️ ytdl-core failed: ${ytdlError.message}`);
+      
+      // Method 2: Try YouTube oEmbed API
+      try {
+        console.log('Trying oEmbed API...');
+        const oembedUrl = `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`;
+        const response = await axios.get(oembedUrl);
+        
+        const details = {
+          title: response.data.title,
+          duration: 600, // Default 10 minutes
+          thumbnail: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+          hasCaption: false
+        };
+        
+        console.log(`✅ oEmbed API success: ${details.title}`);
+        return details;
+        
+      } catch (oembedError) {
+        console.log(`⚠️ oEmbed failed: ${oembedError.message}`);
+        throw new Error('All methods failed');
+      }
+    }
+    
+  } catch (error) {
+    console.error('❌ Could not fetch video details');
+    
+    return {
+      title: `Video ${videoId}`,
+      duration: 600,
+      thumbnail: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+      hasCaption: false
+    };
+  }
+};
+
+
+
+// ==================== VIDEO MANAGEMENT ====================
+
+exports.addVideo = async (req, res) => {
+  try {
+    const { url } = req.body;
+    const userId = req.userId;
+
+    if (!url) {
+      return res.status(400).json({ message: 'Video URL is required' });
+    }
+
+    const youtubeId = extractYoutubeId(url);
+    if (!youtubeId) {
+      return res.status(400).json({ message: 'Invalid YouTube URL' });
+    }
+
+    const existingVideo = await Video.findOne({ userId, youtubeId });
+    if (existingVideo) {
+      return res.json({ 
+        message: 'Video already added',
+        videoId: existingVideo._id 
+      });
+    }
+
+    const videoDetails = await getYouTubeVideoDetails(youtubeId);
+    const totalSegments = calculateSegments(videoDetails.duration);
+
+    // ✅ FIXED: Initialize segmentTranscriptions array with pending segments
+    const segmentTranscriptions = [];
+    for (let i = 0; i < totalSegments; i++) {
+      segmentTranscriptions.push({
+        segment: i,
+        transcription: '',
+        audioData: '',
+        startTime: i * 600,
+        endTime: Math.min((i + 1) * 600, videoDetails.duration),
+        status: 'pending'
+      });
+    }
+
+    const video = new Video({
+      userId,
+      url,
+      youtubeId,
+      title: videoDetails.title,
+      thumbnail: videoDetails.thumbnail,
+      duration: videoDetails.duration,
+      totalSegments,
+      currentSegment: 0,
+      progress: 0,
+      segmentWatchTime: [],
+      segmentTranscriptions: segmentTranscriptions // ✅ CRITICAL: Initialize array
+    });
+
+    await video.save();
+
+    await User.findByIdAndUpdate(userId, {
+      $inc: { 'statistics.totalVideosStarted': 1 }
+    });
+
+    console.log(`✅ Video added: ${youtubeId} with ${totalSegments} segments (${Math.floor(videoDetails.duration/60)} mins)`);
+    console.log(`📋 Initialized ${segmentTranscriptions.length} segment placeholders`);
+
+    res.status(201).json({
+      message: 'Video added successfully',
+      videoId: video._id
+    });
+
+  } catch (error) {
+    console.error('Add video error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+
+exports.getVideoById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userId = req.userId;
+
+    const video = await Video.findOne({ _id: id, userId });
+
+    if (!video) {
+      return res.status(404).json({ message: 'Video not found' });
+    }
+
+    res.json({
+      id: video._id,
+      url: `https://www.youtube.com/embed/${video.youtubeId}`,
+      youtubeId: video.youtubeId,
+      title: video.title,
+      thumbnail: video.thumbnail,
+      duration: video.duration,
+      totalSegments: video.totalSegments,
+      currentSegment: video.currentSegment,
+      progress: {
+        currentSegment: video.currentSegment,
+        completedSegments: video.completedSegments || [],
+        passedQuizzes: video.passedQuizzes || [],
+        overallProgress: video.progress
+      },
+      isCompleted: video.isCompleted || false,
+      // ✅ CRITICAL FIX: Include segmentTranscriptions
+      segmentTranscriptions: video.segmentTranscriptions || []
+    });
+
+  } catch (error) {
+    console.error('Get video error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+
+exports.getRecentVideos = async (req, res) => {
+  try {
+    const userId = req.userId;
+    
+    const videos = await Video.find({ userId })
+      .sort({ lastWatched: -1 })
+      .limit(10);
+
+    const formattedVideos = videos.map(v => ({
+      id: v._id,
+      title: v.title,
+      thumbnail: v.thumbnail,
+      duration: v.duration,
+      progress: v.progress,
+      currentSegment: v.currentSegment,
+      totalSegments: v.totalSegments,
+      lastWatched: v.lastWatched,
+      isCompleted: v.isCompleted || false,
+      quizScore: v.quizScores.length > 0 ? v.quizScores[v.quizScores.length - 1].score : null
+    }));
+
+    res.json({ videos: formattedVideos });
+
+  } catch (error) {
+    console.error('Get recent videos error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+exports.getInProgressVideos = async (req, res) => {
+  try {
+    const userId = req.userId;
+    
+    const videos = await Video.find({ 
+      userId,
+      progress: { $gt: 0, $lt: 100 },
+      isCompleted: false
+    }).sort({ lastWatched: -1 });
+
+    const formattedVideos = videos.map(v => ({
+      id: v._id,
+      title: v.title,
+      thumbnail: v.thumbnail,
+      duration: v.duration,
+      progress: v.progress,
+      currentSegment: v.currentSegment,
+      totalSegments: v.totalSegments,
+      lastWatched: v.lastWatched
+    }));
+
+    res.json({ videos: formattedVideos });
+
+  } catch (error) {
+    console.error('Get in-progress videos error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+exports.getSavedVideos = async (req, res) => {
+  try {
+    const userId = req.userId;
+    
+    const videos = await Video.find({ 
+      userId,
+      isSaved: true
+    }).sort({ lastWatched: -1 });
+
+    const formattedVideos = videos.map(v => ({
+      id: v._id,
+      title: v.title,
+      thumbnail: v.thumbnail,
+      duration: v.duration,
+      progress: v.progress,
+      currentSegment: v.currentSegment,
+      totalSegments: v.totalSegments,
+      lastWatched: v.lastWatched
+    }));
+
+    res.json({ videos: formattedVideos });
+
+  } catch (error) {
+    console.error('Get saved videos error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ==================== TRANSCRIPTION ====================
+exports.getTranscription = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userId = req.userId;
+
+    const video = await Video.findOne({ _id: id, userId });
+
+    if (!video) {
+      return res.status(404).json({ message: 'Video not found' });
+    }
+
+    // ✅ PRIORITY 1: Check if segment transcriptions exist (NEW SYSTEM)
+    if (video.segmentTranscriptions && video.segmentTranscriptions.length > 0) {
+      console.log('📝 Checking segment-based transcriptions...');
+
+      // Get all completed segment transcriptions
+      const completedSegments = video.segmentTranscriptions
+        .filter(s => s.status === 'completed' && s.transcription)
+        .sort((a, b) => a.segment - b.segment);
+
+      if (completedSegments.length > 0) {
+        console.log(`✅ Found ${completedSegments.length} completed segment transcriptions`);
+
+        // Combine all segment transcriptions
+        const combinedTranscript = completedSegments
+          .map(s => {
+            const startMin = Math.floor(s.startTime / 60);
+            const startSec = String(s.startTime % 60).padStart(2, '0');
+            const endMin = Math.floor(s.endTime / 60);
+            const endSec = String(s.endTime % 60).padStart(2, '0');
+
+            return `## Segment ${s.segment} (${startMin}:${startSec} - ${endMin}:${endSec})
+
+${s.transcription}`;
+          })
+          .join('\n\n---\n\n');
+
+        const fullTranscript = `# ${video.title}
+
+## 🎯 Segmented Audio Transcription (Whisper AI)
+
+This transcription was generated segment-by-segment using OpenAI's Whisper AI model for optimal speed and accuracy.
+
+---
+
+${combinedTranscript}
+
+---
+
+**Transcription Details:**
+- Total Segments: ${video.totalSegments}
+- Transcribed Segments: ${completedSegments.length}
+- Pending Segments: ${video.totalSegments - completedSegments.length}
+- Duration: ${Math.floor(video.duration / 60)} minutes
+- Model: Tiny (Optimized for speed)
+- Source: Actual Audio (Segment-wise)
+
+${completedSegments.length < video.totalSegments ? `\n⚠️ **Note:** Not all segments have been transcribed yet. Transcription happens as you watch the video.` : '✅ All segments transcribed!'}`;
+
+        // Don't save - already saved in segmentTranscriptions
+        return res.json({
+          transcription: fullTranscript,
+          segmentBased: true,
+          completedSegments: completedSegments.length,
+          totalSegments: video.totalSegments
+        });
+      } else {
+        // Segments exist but none completed yet
+        return res.status(202).json({
+          message: 'Transcription in progress. Segments are being transcribed as you watch the video.',
+          segmentBased: true,
+          completedSegments: 0,
+          totalSegments: video.totalSegments,
+          processingSegments: video.segmentTranscriptions.filter(s => s.status === 'processing').length
+        });
+      }
+    }
+
+    // ✅ PRIORITY 2: Return cached full transcription if exists (OLD SYSTEM - backward compatibility)
+    if (video.transcription) {
+      console.log('✅ Returning cached full transcription (old system)');
+      return res.json({
+        transcription: video.transcription,
+        segmentBased: false,
+        legacy: true
+      });
+    }
+
+    // ✅ PRIORITY 3: Try YouTube Native Transcript (instant, free)
+    console.log(`🎥 No transcription found, attempting YouTube native captions...`);
+    const videoUrl = `https://www.youtube.com/watch?v=${video.youtubeId}`;
+
+    try {
+      console.log('📝 Method 1: Attempting YouTube native transcript...');
+
+      const { YoutubeTranscript } = require('youtube-transcript');
+      const languagesToTry = ['en', 'en-US', 'en-GB'];
+      let transcriptData = null;
+
+      for (const lang of languagesToTry) {
+        try {
+          console.log(`   Trying language: ${lang}...`);
+          transcriptData = await YoutubeTranscript.fetchTranscript(video.youtubeId, {
+            lang: lang
+          });
+
+          if (transcriptData && transcriptData.length > 0) {
+            console.log(`   ✅ Found transcript in ${lang}!`);
+            break;
+          }
+        } catch (langError) {
+          console.log(`   ❌ ${lang} not available`);
+        }
+      }
+
+      if (!transcriptData || transcriptData.length === 0) {
+        console.log('   Trying default language...');
+        transcriptData = await YoutubeTranscript.fetchTranscript(video.youtubeId);
+      }
+
+      if (transcriptData && transcriptData.length > 0) {
+        const transcriptText = transcriptData
+          .map(item => item.text)
+          .join(' ')
+          .trim();
+
+        if (transcriptText.length > 100) {
+          console.log(`✅ YouTube transcript found: ${transcriptText.length} chars`);
+
+          const formattedTranscript = `# ${video.title}
+
+## 🎯 Video Transcription (YouTube Captions)
+
+This is the exact content from YouTube's official captions.
+
+---
+
+${transcriptText}
+
+---
+
+**Video Details:**
+- Duration: ${Math.floor(video.duration / 60)} minutes
+- Segments: ${video.totalSegments}
+- Source: YouTube Native Captions
+- Characters: ${transcriptText.length}
+
+**Note:** For better segment-specific transcriptions, we now use Whisper AI which transcribes each segment as you watch.`;
+
+          video.transcription = formattedTranscript;
+          await video.save();
+
+          console.log('✅ Transcription saved (YouTube Native)');
+          return res.json({ transcription: formattedTranscript, source: 'youtube' });
+        }
+      }
+
+    } catch (ytError) {
+      console.log(`⚠️ YouTube transcript failed: ${ytError.message}`);
+    }
+
+    // ✅ PRIORITY 4: Inform user to use segment-based transcription
+    console.log('⚠️ No transcript available - user should watch video for segment transcription');
+
+    return res.status(202).json({
+      message: 'No transcription available yet. Segments will be transcribed automatically as you watch the video.',
+      recommendation: 'Start watching the video. Each 10-minute segment will be transcribed in 2-3 minutes.',
+      segmentBased: true,
+      totalSegments: video.totalSegments,
+      segmentDuration: '10 minutes',
+      estimatedTimePerSegment: '2-3 minutes'
+    });
+
+  } catch (error) {
+    console.error('❌ Transcription error:', error);
+    res.status(500).json({ message: 'Failed to get transcription' });
+  }
+};
+
+// ==================== SEGMENT TRANSCRIPTION ====================
+
+exports.getSegmentTranscription = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { segment } = req.query;
+    const userId = req.userId;
+
+    console.log(`🎯 Segment transcription request: Video ${id}, Segment ${segment}`);
+
+    const video = await Video.findOne({ _id: id, userId });
+
+    if (!video) {
+      return res.status(404).json({ message: 'Video not found' });
+    }
+
+    const segmentNum = parseInt(segment);
+
+    if (isNaN(segmentNum) || segmentNum < 0 || segmentNum >= video.totalSegments) {
+      return res.status(400).json({
+        message: `Invalid segment number. Must be between 0 and ${video.totalSegments - 1}`
+      });
+    }
+
+    // ✅ FIXED: Ensure segmentTranscriptions exists
+    if (!video.segmentTranscriptions || video.segmentTranscriptions.length === 0) {
+      console.log(`⚠️ Initializing segmentTranscriptions array for video ${id}`);
+      video.segmentTranscriptions = [];
+      for (let i = 0; i < video.totalSegments; i++) {
+        video.segmentTranscriptions.push({
+          segment: i,
+          transcription: '',
+          audioData: '',
+          startTime: i * 600,
+          endTime: Math.min((i + 1) * 600, video.duration),
+          status: 'pending'
+        });
+      }
+      await video.save();
+    }
+
+    // ✅ NEW: Check current status to prevent duplicates
+    const segmentIndex = video.segmentTranscriptions.findIndex(s => s.segment === segmentNum);
+    
+    if (segmentIndex >= 0) {
+      const currentSegment = video.segmentTranscriptions[segmentIndex];
+      
+      // If already completed, return cached
+      if (currentSegment.status === 'completed' && currentSegment.transcription) {
+        console.log(`✅ Returning cached segment ${segmentNum} transcription`);
+        return res.json({
+          segment: segmentNum,
+          transcription: currentSegment.transcription,
+          audioData: currentSegment.audioData,
+          cached: true
+        });
+      }
+      
+      // If already processing, reject duplicate
+      if (currentSegment.status === 'processing') {
+        console.log(`⚠️ Segment ${segmentNum} already being transcribed, rejecting duplicate request`);
+        return res.status(409).json({
+          message: 'Segment transcription already in progress. Please wait.',
+          segment: segmentNum,
+          status: 'processing'
+        });
+      }
+      
+      // Mark as processing
+      video.segmentTranscriptions[segmentIndex].status = 'processing';
+    } else {
+      // Segment not found, add it
+      video.segmentTranscriptions.push({
+        segment: segmentNum,
+        transcription: '',
+        audioData: '',
+        startTime: segmentNum * 600,
+        endTime: Math.min((segmentNum + 1) * 600, video.duration),
+        status: 'processing'
+      });
+    }
+    
+    video.markModified('segmentTranscriptions');
+    await video.save();
+
+    console.log(`🎙️ Starting transcription for segment ${segmentNum}...`);
+
+    // Transcribe the segment
+    const result = await transcribeSegment(video.youtubeId, segmentNum, 600,video.duration);
+
+    // Save segment transcription immediately
+    const updatedVideo = await Video.findOne({ _id: id, userId });
+    if (!updatedVideo) {
+      return res.status(404).json({ message: 'Video was deleted during transcription' });
+    }
+
+    // ✅ FIXED: Update using array index
+// ✅ FIXED: Update using direct object replacement (forces Mongoose to detect change)
+const updateIndex = updatedVideo.segmentTranscriptions.findIndex(s => s.segment === segmentNum);
+
+if (updateIndex >= 0) {
+  // Create new object to force Mongoose to detect change
+  updatedVideo.segmentTranscriptions[updateIndex] = {
+    segment: segmentNum,
+    transcription: result.transcription,
+    audioData: result.audioData,
+    startTime: segmentNum * 600,
+    endTime: Math.min((segmentNum + 1) * 600, updatedVideo.duration),
+    status: 'completed',
+    transcribedAt: new Date()
+  };
+  
+  // Mark as modified (critical for nested arrays)
+  updatedVideo.markModified('segmentTranscriptions');
+  updatedVideo.markModified(`segmentTranscriptions.${updateIndex}`);
+  updatedVideo.markModified(`segmentTranscriptions.${updateIndex}.status`);
+  
+  // Save with validation disabled (faster)
+  await updatedVideo.save({ validateBeforeSave: false });
+  
+  // ✅ VERIFY: Reload from DB to confirm save
+  const verifyVideo = await Video.findOne({ _id: id, userId });
+  const verifySegment = verifyVideo.segmentTranscriptions[updateIndex];
+  
+  console.log(`✅ Segment ${segmentNum} transcription saved successfully`);
+  console.log(`💾 Data size: ${result.transcription.length} chars, ${(result.audioData.length / 1024).toFixed(2)} KB audio`);
+  console.log(`✅ VERIFIED: Status in DB = "${verifySegment.status}"`);
+  
+  if (verifySegment.status !== 'completed') {
+    console.error(`❌ CRITICAL: Status not saved correctly! DB shows: "${verifySegment.status}"`);
+  }
+} else {
+  console.error(`❌ Segment ${segmentNum} not found in array after transcription`);
+}
+
+
+// ✅ Cleanup full audio if this is the last segment
+if (segmentNum + 1 >= video.totalSegments) {
+  console.log(`🎉 Last segment transcribed! Cleaning up full audio...`);
+  const { cleanupFullAudio } = require('../services/audioSegmentService');
+  setTimeout(() => {
+    cleanupFullAudio(video.youtubeId);
+  }, 5000);
+}
+
+
+
+    res.json({
+      segment: segmentNum,
+      transcription: result.transcription,
+      audioData: result.audioData,
+      cached: false
+    });
+
+  } catch (error) {
+    console.error('❌ Segment transcription error:', error);
+
+    // Mark as failed
+    try {
+      const video = await Video.findOne({ _id: req.params.id, userId: req.userId });
+      if (video && video.segmentTranscriptions) {
+        const segmentIndex = video.segmentTranscriptions.findIndex(
+          s => s.segment === parseInt(req.query.segment)
+        );
+        if (segmentIndex >= 0) {
+          video.segmentTranscriptions[segmentIndex].status = 'failed';
+          video.markModified('segmentTranscriptions');
+          await video.save();
+        }
+      }
+    } catch (updateError) {
+      console.error('Failed to update status:', updateError);
+    }
+
+    res.status(500).json({ message: 'Failed to transcribe segment' });
+  }
+};
+
+
+
+
+// ==================== QUIZ SYSTEM ====================
+
+exports.generateQuiz = async (req, res) => {
+  try {
+    const { videoId, segmentIndex } = req.params;
+    const userId = req.userId;
+
+    console.log(`\n${'='.repeat(60)}`);
+    console.log(`📝 QUIZ GENERATION REQUEST`);
+    console.log(`   Video ID: ${videoId}`);
+    console.log(`   Segment: ${segmentIndex}`);
+    console.log(`${'='.repeat(60)}\n`);
+
+    const video = await Video.findOne({ _id: videoId, userId });
+
+    if (!video) {
+      console.log('❌ Video not found');
+      return res.status(404).json({ message: 'Video not found' });
+    }
+
+    console.log(`✅ Video found: ${video.title}`);
+    console.log(`📊 Total segments: ${video.totalSegments}`);
+
+// Check for existing quiz
+let quiz = await Quiz.findOne({ 
+  videoId, 
+  userId, 
+  segmentIndex: parseInt(segmentIndex) 
+});
+
+if (quiz && quiz.questions.length > 0) {
+  console.log(`📋 Returning existing quiz for segment ${segmentIndex}`);
+  
+  // ✅ NEW: Display correct answers for existing quiz
+  console.log(`✅ QUIZ GENERATED - Segment ${segmentIndex}\n`);
+  questions.forEach((q, i) => {
+    const correctLetter = String.fromCharCode(65 + q.correctAnswer);
+    console.log(`   Q${i + 1}: ${q.question.substring(0, 50)}...`);
+    console.log(`   ✅ Answer: ${correctLetter}. ${q.options[q.correctAnswer]}\n`);
+  });
+
+  
+  return res.json({ 
+    questions: quiz.questions.map(q => ({
+      question: q.question,
+      options: q.options,
+      correctAnswer: q.correctAnswer
+    })),
+    totalAttempts: quiz.attempts.length,
+    bestScore: quiz.bestScore || 0,
+    isPassed: quiz.isPassed || false
+  });
+}
+
+
+    // ✅ FIXED: Get segment-specific transcription FIRST (before checking old transcription)
+    let segmentTranscript = '';
+    const segmentDoc = video.segmentTranscriptions?.find(
+      s => s.segment === parseInt(segmentIndex) && s.status === 'completed'
+    );
+
+    if (segmentDoc && segmentDoc.transcription) {
+      // Use actual segment transcription from Whisper
+      segmentTranscript = segmentDoc.transcription;
+      console.log(`📝 Using segment ${segmentIndex} transcription: ${segmentTranscript.length} chars (from Whisper)`);
+    } else {
+      console.log(`⚠️ Segment ${segmentIndex} transcription not found, trying fallback...`);
+      
+      // Fallback: Try to use full video transcription (old method)
+      if (video.transcription) {
+        console.log(`📝 Using full video transcription as fallback`);
+
+        // Calculate word boundaries for this segment
+        const segmentDuration = video.duration / video.totalSegments;
+        const totalWords = video.transcription.split(/\s+/).length;
+        const wordsPerSecond = totalWords / video.duration;
+        const wordsPerSegment = Math.floor(wordsPerSecond * segmentDuration);
+
+        const allWords = video.transcription.split(/\s+/);
+        const startWord = Math.floor(parseInt(segmentIndex) * wordsPerSegment);
+        const endWord = Math.floor(Math.min((parseInt(segmentIndex) + 1) * wordsPerSegment, totalWords));
+
+        segmentTranscript = allWords.slice(startWord, endWord).join(' ');
+        console.log(`📝 Extracted ${segmentTranscript.length} chars from full transcript`);
+
+        // If extracted segment is too short, use more context
+        if (segmentTranscript.length < 200) {
+          console.log('⚠️ Extracted segment too short, using larger portion');
+          segmentTranscript = video.transcription.substring(0, 5000);
+        }
+      } else {
+        // No transcription available at all
+        console.log('❌ No transcription available (segment or full)');
+        return res.status(400).json({
+          message: 'Transcription not available for this segment. Please wait for transcription to complete.',
+          needsTranscription: true,
+          segment: parseInt(segmentIndex)
+        });
+      }
+    }
+
+    // Clean up transcript
+    segmentTranscript = segmentTranscript.replace(/\*\*⚠️ TRANSCRIPTION NOTE:\*\*/g, '');
+    segmentTranscript = segmentTranscript.replace(/---/g, '');
+    segmentTranscript = segmentTranscript.trim();
+
+    // Validate transcript length
+    if (segmentTranscript.length < 50) {
+      console.log(`❌ Transcript too short: ${segmentTranscript.length} chars`);
+      return res.status(400).json({
+        message: 'Segment transcription too short to generate meaningful quiz. Please try again.',
+        needsTranscription: true
+      });
+    }
+
+    console.log(`✅ Final transcript ready: ${segmentTranscript.length} chars`);
+    console.log(`📝 Generating quiz for segment ${segmentIndex}...`);
+
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+
+    const prompt = `You are an expert educational quiz creator. Based on the following video transcription content, generate exactly 5 multiple-choice questions that test understanding of the ACTUAL content covered.
+
+TRANSCRIPTION CONTENT:
+${segmentTranscript.substring(0, 8000)}
+
+**CRITICAL INSTRUCTIONS:**
+1. Questions MUST be about specific topics and concepts mentioned in the transcription
+2. Use exact terminology from the transcription
+3. Make questions challenging but fair
+4. All 4 options should be plausible
+5. Provide clear explanations
+
+**RESPONSE FORMAT:**
+Return ONLY a valid JSON array. Do NOT wrap in markdown code blocks.
+
+Format:
+[{"question":"...","options":["A","B","C","D"],"correctAnswer":0,"explanation":"..."}]
+
+Generate 5 content-specific questions now:`;
+
+    try {
+      const result = await model.generateContent(prompt);
+      const response = await result.response;
+      let responseText = response.text();
+      
+      console.log('📥 Raw Gemini response received');
+      
+      // Clean JSON response
+  responseText = responseText
+    .replace(/```json/g, '')
+    .replace(/```javascript/g, '')
+    .replace(/```/g, '')
+    .trim();
+      
+      const firstBracket = responseText.indexOf('[');
+      const lastBracket = responseText.lastIndexOf(']');
+      
+      if (firstBracket !== -1 && lastBracket !== -1) {
+        responseText = responseText.substring(firstBracket, lastBracket + 1);
+      }
+      
+      const questions = JSON.parse(responseText);
+
+      if (!Array.isArray(questions) || questions.length === 0) {
+        throw new Error('Invalid quiz format');
+      }
+
+      questions.forEach((q, i) => {
+        if (!q.question || !Array.isArray(q.options) || q.options.length !== 4 || q.correctAnswer === undefined) {
+          throw new Error(`Question ${i + 1} is invalid`);
+        }
+      });
+
+console.log(`✅ QUIZ GENERATED - Segment ${segmentIndex}`);
+console.log(`\n${'─'.repeat(60)}`);
+questions.forEach((q, i) => {
+  console.log(`\n📝 Question ${i + 1}:`);
+  console.log(`   ${q.question}`);
+  console.log(`\n   Options:`);
+  q.options.forEach((opt, idx) => {
+    const marker = idx === q.correctAnswer ? '✅' : '  ';
+    console.log(`   ${marker} ${String.fromCharCode(65 + idx)}. ${opt}`);
+  });
+  console.log(`\n   ✅ Correct Answer: ${String.fromCharCode(65 + q.correctAnswer)} (${q.options[q.correctAnswer]})`);
+});
+console.log(`\n${'─'.repeat(60)}\n`);
+
+
+      if (!quiz) {
+        quiz = new Quiz({
+          videoId,
+          userId,
+          segmentIndex: parseInt(segmentIndex),
+          questions: questions.map(q => ({
+            question: q.question,
+            options: q.options,
+            correctAnswer: q.correctAnswer,
+            explanation: q.explanation || ''
+          })),
+          attempts: [],
+          bestScore: 0,
+          isPassed: false
+        });
+      } else {
+        quiz.questions = questions.map(q => ({
+          question: q.question,
+          options: q.options,
+          correctAnswer: q.correctAnswer,
+          explanation: q.explanation || ''
+        }));
+      }
+
+      await quiz.save();
+      console.log(`💾 Quiz saved to database\n`);
+
+      res.json({ 
+        questions: quiz.questions.map(q => ({
+          question: q.question,
+          options: q.options,
+          correctAnswer: q.correctAnswer
+        })),
+        totalAttempts: 0,
+        bestScore: 0,
+        isPassed: false
+      });
+
+    } catch (geminiError) {
+      console.error('❌ Gemini quiz error:', geminiError.message);
+      console.log('📋 Using fallback questions...');
+      
+      const fallbackQuestions = [
+        {
+          question: 'Based on the video content, what is the main topic discussed?',
+          options: [
+            'Core programming concepts',
+            'Unrelated content',
+            'General introduction only',
+            'Advanced techniques only'
+          ],
+          correctAnswer: 0,
+          explanation: 'The video focuses on core programming concepts as discussed in the transcription.'
+        },
+        {
+          question: 'What teaching approach is used in this content?',
+          options: [
+            'Theory only',
+            'Practice only',
+            'Both theory and practice',
+            'Neither'
+          ],
+          correctAnswer: 2,
+          explanation: 'Educational content typically combines theory and practice.'
+        },
+        {
+          question: 'What should be the focus while learning this material?',
+          options: [
+            'Speed of completion',
+            'Understanding concepts deeply',
+            'Memorization only',
+            'Skipping examples'
+          ],
+          correctAnswer: 1,
+          explanation: 'Understanding concepts is key to effective learning.'
+        },
+        {
+          question: 'How should you approach the examples shown?',
+          options: [
+            'Skip them',
+            'Study them carefully',
+            'Ignore the details',
+            'Only read descriptions'
+          ],
+          correctAnswer: 1,
+          explanation: 'Examples help reinforce concepts and should be studied carefully.'
+        },
+        {
+          question: 'What is the benefit of segmented learning?',
+          options: [
+            'Faster completion',
+            'Better focus and retention',
+            'Less effort required',
+            'No testing needed'
+          ],
+          correctAnswer: 1,
+          explanation: 'Breaking content into segments helps maintain focus and improves retention.'
+        }
+      ];
+
+      quiz = quiz || new Quiz({
+        videoId,
+        userId,
+        segmentIndex: parseInt(segmentIndex),
+        questions: fallbackQuestions,
+        attempts: [],
+        bestScore: 0,
+        isPassed: false
+      });
+
+      quiz.questions = fallbackQuestions;
+      await quiz.save();
+
+      res.json({ 
+        questions: quiz.questions.map(q => ({
+          question: q.question,
+          options: q.options,
+          correctAnswer: q.correctAnswer
+        })),
+        totalAttempts: 0,
+        bestScore: 0,
+        isPassed: false
+      });
+    }
+
+  } catch (error) {
+    console.error('❌ Quiz generation error:', error);
+    res.status(500).json({ message: 'Failed to generate quiz' });
+  }
+};
+
+
+exports.submitQuiz = async (req, res) => {
+  try {
+    const { videoId, segmentIndex } = req.params;
+    const { answers, timeTaken } = req.body;
+    const userId = req.userId;
+
+    console.log('📥 Quiz submission received for segment', segmentIndex);
+
+    const quiz = await Quiz.findOne({ 
+      videoId, 
+      userId, 
+      segmentIndex: parseInt(segmentIndex) 
+    });
+
+    if (!quiz) {
+      return res.status(404).json({ message: 'Quiz not found' });
+    }
+
+    const answersArray = Array.isArray(answers) ? answers : Object.values(answers);
+
+    let correctCount = 0;
+    const results = quiz.questions.map((q, index) => {
+      const userAnswer = answersArray[index];
+      const isCorrect = userAnswer === q.correctAnswer;
+      if (isCorrect) correctCount++;
+
+      return {
+        questionIndex: index,
+        question: q.question,
+        userAnswer,
+        correctAnswer: q.correctAnswer,
+        isCorrect,
+        explanation: q.explanation
+      };
+    });
+
+    const score = Math.round((correctCount / quiz.questions.length) * 100);
+    const passed = score >= 70;
+
+    console.log(`📊 Quiz Result: ${score}% (${correctCount}/${quiz.questions.length}) - ${passed ? 'PASSED' : 'FAILED'}`);
+
+    quiz.attempts.push({
+      answers: answersArray,
+      score,
+      passed,
+      correctAnswers: correctCount,
+      totalQuestions: quiz.questions.length,
+      attemptedAt: new Date(),
+      timeTaken: timeTaken || 0
+    });
+
+    if (score > quiz.bestScore) {
+      quiz.bestScore = score;
+    }
+
+    if (passed && !quiz.isPassed) {
+      quiz.isPassed = true;
+      quiz.passedAt = new Date();
+    }
+
+    await quiz.save();
+
+    if (passed) {
+      const video = await Video.findById(videoId);
+      
+      if (!video.completedSegments.includes(parseInt(segmentIndex))) {
+        video.completedSegments.push(parseInt(segmentIndex));
+      }
+      
+      if (!video.passedQuizzes.includes(parseInt(segmentIndex))) {
+        video.passedQuizzes.push(parseInt(segmentIndex));
+      }
+
+      const existingScoreIndex = video.quizScores.findIndex(
+        qs => qs.segment === parseInt(segmentIndex)
+      );
+
+      if (existingScoreIndex >= 0) {
+        video.quizScores[existingScoreIndex] = {
+          segment: parseInt(segmentIndex),
+          score,
+          attempts: quiz.attempts.length,
+          passed,
+          attemptedAt: new Date()
+        };
+      } else {
+        video.quizScores.push({
+          segment: parseInt(segmentIndex),
+          score,
+          attempts: quiz.attempts.length,
+          passed,
+          attemptedAt: new Date()
+        });
+      }
+
+      if (parseInt(segmentIndex) === video.currentSegment) {
+        video.currentSegment = Math.min(video.currentSegment + 1, video.totalSegments - 1);
+      }
+
+      video.progress = Math.round((video.completedSegments.length / video.totalSegments) * 100);
+      
+      if (video.completedSegments.length === video.totalSegments) {
+        video.isCompleted = true;
+        video.completedAt = new Date();
+        video.progress = 100;
+        
+        await User.findByIdAndUpdate(userId, {
+          $inc: { 
+            'statistics.totalVideosCompleted': 1
+          }
+        });
+      }
+
+      video.lastWatched = new Date();
+      await video.save();
+      
+      console.log(`✅ Progress updated: ${video.progress}% complete`);
+    }
+
+    await User.findByIdAndUpdate(userId, {
+      $inc: { 
+        'statistics.totalQuizzesTaken': 1,
+        'statistics.totalQuizzesPassed': passed ? 1 : 0
+      }
+    });
+
+    res.json({
+      score,
+      passed,
+      correctCount,
+      totalQuestions: quiz.questions.length,
+      results,
+      attempts: quiz.attempts.length,
+      bestScore: quiz.bestScore,
+      canProceed: passed
+    });
+
+  } catch (error) {
+    console.error('Submit quiz error:', error);
+    res.status(500).json({ 
+      message: 'Failed to submit quiz',
+      error: error.message 
+    });
+  }
+};
+
+// ==================== USER STATISTICS & REPORTING ====================
+
+exports.getUserStats = async (req, res) => {
+  try {
+    const userId = req.userId;
+    
+    const user = await User.findById(userId);
+    const totalVideos = await Video.countDocuments({ userId });
+    const completedVideos = await Video.countDocuments({ userId, isCompleted: true });
+    
+    const videos = await Video.find({ userId });
+    
+    let totalQuizzes = 0;
+    let totalScore = 0;
+    let totalWatchTime = 0;
+    
+    videos.forEach(v => {
+      totalQuizzes += v.quizScores.length;
+      v.quizScores.forEach(q => {
+        totalScore += q.score;
+      });
+      totalWatchTime += (v.duration * v.progress) / 100;
+    });
+
+    const averageScore = totalQuizzes > 0 ? Math.round(totalScore / totalQuizzes) : 0;
+
+    res.json({
+      totalVideos,
+      completedVideos,
+      quizzesTaken: totalQuizzes,
+      averageScore,
+      streakDays: user?.statistics?.currentStreak || 0,
+      totalWatchTime: Math.floor(totalWatchTime / 60)
+    });
+
+  } catch (error) {
+    console.error('Get user stats error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+exports.getUserReport = async (req, res) => {
+  try {
+    const userId = req.userId;
+    
+    const user = await User.findById(userId);
+    const videos = await Video.find({ userId }).sort({ lastWatched: -1 });
+    const quizzes = await Quiz.find({ userId });
+
+    const totalVideos = videos.length;
+    const completedVideos = videos.filter(v => v.isCompleted).length;
+    const inProgressVideos = videos.filter(v => v.progress > 0 && !v.isCompleted).length;
+    
+    let totalQuizzesTaken = 0;
+    let totalQuizzesPassed = 0;
+    let totalQuizAttempts = 0;
+    let allScores = [];
+    
+    quizzes.forEach(quiz => {
+      totalQuizAttempts += quiz.attempts.length;
+      if (quiz.attempts.length > 0) {
+        totalQuizzesTaken++;
+        if (quiz.isPassed) {
+          totalQuizzesPassed++;
+        }
+        quiz.attempts.forEach(attempt => {
+          allScores.push(attempt.score);
+        });
+      }
+    });
+
+    const averageScore = allScores.length > 0 
+      ? Math.round(allScores.reduce((a, b) => a + b, 0) / allScores.length) 
+      : 0;
+
+    const passRate = totalQuizzesTaken > 0 
+      ? Math.round((totalQuizzesPassed / totalQuizzesTaken) * 100) 
+      : 0;
+
+    let totalWatchTimeSeconds = 0;
+    videos.forEach(v => {
+      totalWatchTimeSeconds += (v.duration * v.progress) / 100;
+    });
+    const totalWatchTimeMinutes = Math.floor(totalWatchTimeSeconds / 60);
+
+    const videoPerformance = videos.map(v => {
+      const videoQuizzes = quizzes.filter(q => q.videoId.toString() === v._id.toString());
+      
+      let videoTotalAttempts = 0;
+      let videoTotalPassed = 0;
+      let videoScores = [];
+      
+      videoQuizzes.forEach(quiz => {
+        videoTotalAttempts += quiz.attempts.length;
+        if (quiz.isPassed) videoTotalPassed++;
+        quiz.attempts.forEach(attempt => {
+          videoScores.push(attempt.score);
+        });
+      });
+
+      const videoAvgScore = videoScores.length > 0
+        ? Math.round(videoScores.reduce((a, b) => a + b, 0) / videoScores.length)
+        : 0;
+
+      return {
+        videoId: v._id,
+        title: v.title,
+        thumbnail: v.thumbnail,
+        duration: v.duration,
+        progress: v.progress,
+        isCompleted: v.isCompleted,
+        completedSegments: v.completedSegments.length,
+        totalSegments: v.totalSegments,
+        quizzesTaken: videoQuizzes.length,
+        quizzesPassed: videoTotalPassed,
+        totalAttempts: videoTotalAttempts,
+        averageScore: videoAvgScore,
+        lastWatched: v.lastWatched,
+        completedAt: v.completedAt
+      };
+    });
+
+    const segmentPerformance = {};
+    videos.forEach(v => {
+      const videoQuizzes = quizzes.filter(q => q.videoId.toString() === v._id.toString());
+      
+      segmentPerformance[v._id] = [];
+      
+      for (let i = 0; i < v.totalSegments; i++) {
+        const segmentQuiz = videoQuizzes.find(q => q.segmentIndex === i);
+        
+        if (segmentQuiz) {
+          const attempts = segmentQuiz.attempts.length;
+          const passed = segmentQuiz.isPassed;
+          const bestScore = segmentQuiz.bestScore;
+          
+          const attemptDetails = segmentQuiz.attempts.map(att => ({
+            score: att.score,
+            passed: att.passed,
+            correctAnswers: att.correctAnswers,
+            totalQuestions: att.totalQuestions,
+            attemptedAt: att.attemptedAt,
+            timeTaken: att.timeTaken
+          }));
+
+          segmentPerformance[v._id].push({
+            segment: i,
+            attempts,
+            passed,
+            bestScore,
+            attemptDetails
+          });
+        } else {
+          segmentPerformance[v._id].push({
+            segment: i,
+            attempts: 0,
+            passed: false,
+            bestScore: 0,
+            attemptDetails: []
+          });
+        }
+      }
+    });
+
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    
+    const recentVideos = videos.filter(v => v.lastWatched >= sevenDaysAgo);
+    const recentQuizAttempts = quizzes.reduce((count, quiz) => {
+      return count + quiz.attempts.filter(att => att.attemptedAt >= sevenDaysAgo).length;
+    }, 0);
+
+    const sortedVideos = videos.sort((a, b) => b.lastWatched - a.lastWatched);
+    let currentStreak = 0;
+    let currentDate = new Date();
+    currentDate.setHours(0, 0, 0, 0);
+
+    for (let video of sortedVideos) {
+      const videoDate = new Date(video.lastWatched);
+      videoDate.setHours(0, 0, 0, 0);
+      
+      const daysDiff = Math.floor((currentDate - videoDate) / (1000 * 60 * 60 * 24));
+      
+      if (daysDiff === currentStreak) {
+        currentStreak++;
+      } else if (daysDiff > currentStreak + 1) {
+        break;
+      }
+    }
+
+    res.json({
+      overview: {
+        totalVideos,
+        completedVideos,
+        inProgressVideos,
+        totalQuizzesTaken,
+        totalQuizzesPassed,
+        totalQuizAttempts,
+        averageScore,
+        passRate,
+        totalWatchTimeMinutes,
+        currentStreak
+      },
+      videoPerformance,
+      segmentPerformance,
+      recentActivity: {
+        videosWatchedLast7Days: recentVideos.length,
+        quizAttemptsLast7Days: recentQuizAttempts
+      },
+      scoreDistribution: {
+        scores90Plus: allScores.filter(s => s >= 90).length,
+        scores80To89: allScores.filter(s => s >= 80 && s < 90).length,
+        scores70To79: allScores.filter(s => s >= 70 && s < 80).length,
+        scoresBelow70: allScores.filter(s => s < 70).length
+      }
+    });
+
+  } catch (error) {
+    console.error('Get user report error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+exports.getNotificationsCount = async (req, res) => {
+  try {
+    const userId = req.userId;
+    const incompleteCount = await Video.countDocuments({ 
+      userId, 
+      progress: { $gt: 0, $lt: 100 },
+      isCompleted: false
+    });
+    
+    res.json({ count: incompleteCount });
+  } catch (error) {
+    console.error('Get notifications error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+
+// ==================== DELETE VIDEO ====================
+
+exports.deleteVideo = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userId = req.userId;
+
+    console.log(`🗑️ Delete request for video: ${id}`);
+
+    // Find video and verify ownership
+    const video = await Video.findOne({ _id: id, userId });
+
+    if (!video) {
+      return res.status(404).json({ message: 'Video not found' });
+    }
+
+    // Log what's being deleted
+    console.log(`  Video: ${video.title}`);
+    console.log(`  Has transcription: ${video.transcription ? 'Yes' : 'No'}`);
+    console.log(`  Has audio data: ${video.audioData ? 'Yes (' + (video.audioData.length / 1024).toFixed(2) + ' KB)' : 'No'}`);
+
+    // Delete associated quizzes
+    const deletedQuizzes = await Quiz.deleteMany({ videoId: id, userId });
+    console.log(`  Deleted ${deletedQuizzes.deletedCount} quizzes`);
+
+    // Delete the video (this automatically deletes transcription and audioData)
+    await Video.deleteOne({ _id: id, userId });
+    console.log(`  Deleted video document (including transcription and audio)`);
+
+    // Update user statistics
+    await User.findByIdAndUpdate(userId, {
+      $inc: { 
+        'statistics.totalVideosStarted': -1,
+        'statistics.totalVideosCompleted': video.isCompleted ? -1 : 0
+      }
+    });
+
+    console.log(`✅ Video deleted successfully: ${id}`);
+    console.log(`   📦 Audio data freed from database`);
+
+    res.json({ 
+      message: 'Video deleted successfully',
+      videoId: id,
+      title: video.title,
+      deletedQuizzes: deletedQuizzes.deletedCount,
+      audioDeleted: video.audioData ? true : false
+    });
+
+  } catch (error) {
+    console.error('❌ Delete video error:', error);
+    res.status(500).json({ message: 'Failed to delete video' });
+  }
+};
+
+
+// ==================== AI CHATBOT ====================
+
+
+exports.handleChat = async (req, res) => {
+  try {
+    const { videoId, message } = req.body;
+    const userId = req.userId;
+
+    const video = await Video.findOne({ _id: videoId, userId });
+
+    if (!video) {
+      return res.status(404).json({ message: 'Video not found' });
+    }
+
+    // ✅ NEW: Combine segment transcriptions for chatbot context
+    let videoContext = '';
+
+    if (video.segmentTranscriptions && video.segmentTranscriptions.length > 0) {
+      const completedSegments = video.segmentTranscriptions
+        .filter(s => s.status === 'completed' && s.transcription)
+        .sort((a, b) => a.segment - b.segment);
+
+      if (completedSegments.length > 0) {
+        console.log(`🤖 Using ${completedSegments.length} segment transcriptions for chatbot context`);
+
+        videoContext = completedSegments
+          .map(s => `[Segment ${s.segment} - ${Math.floor(s.startTime / 60)}:${String(s.startTime % 60).padStart(2, '0')}]\n${s.transcription}`)
+          .join('\n\n');
+      }
+    }
+
+    // Fallback to full transcription if no segments available
+    if (!videoContext && video.transcription) {
+      console.log('🤖 Using full video transcription for chatbot (fallback)');
+      videoContext = video.transcription;
+    }
+
+    if (!videoContext) {
+      return res.status(400).json({
+        message: 'No transcription available yet. Please watch more of the video first.',
+        needsTranscription: true
+      });
+    }
+
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+
+    const prompt = `You are an AI tutor helping a student understand educational video content.
+
+VIDEO TITLE: ${video.title}
+
+AVAILABLE TRANSCRIPTION:
+${videoContext.substring(0, 15000)}
+
+STUDENT QUESTION: ${message}
+
+Provide a helpful, accurate answer based on the video content. If the question is not related to the video, politely redirect them to ask about the video content.`;
+
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    const answer = response.text();
+
+    console.log(`💬 Chatbot response generated (${answer.length} chars)`);
+
+    res.json({
+      answer,
+      availableSegments: video.segmentTranscriptions?.filter(s => s.status === 'completed').length || 0,
+      totalSegments: video.totalSegments
+    });
+
+  } catch (error) {
+    console.error('Chat error:', error);
+    res.status(500).json({ message: 'Failed to process chat message' });
+  }
+};

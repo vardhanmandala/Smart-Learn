@@ -1,0 +1,874 @@
+// const { spawn } = require('child_process');
+// const path = require('path');
+// const fs = require('fs');
+
+// const TEMP_DIR = path.join(__dirname, '../temp');
+// if (!fs.existsSync(TEMP_DIR)) {
+//   fs.mkdirSync(TEMP_DIR, { recursive: true });
+// }
+
+// /**
+//  * Helper: Safe file cleanup with retry
+//  */
+// const cleanupFile = (filePath) => {
+//   if (!fs.existsSync(filePath)) return;
+  
+//   let retries = 5;
+//   while (retries > 0) {
+//     try {
+//       fs.unlinkSync(filePath);
+//       return true;
+//     } catch (err) {
+//       retries--;
+//       if (retries > 0) {
+//         const start = Date.now();
+//         while (Date.now() - start < 1000) {}
+//       }
+//     }
+//   }
+//   console.log(`⚠️  Could not delete ${path.basename(filePath)}, will be cleaned later`);
+//   return false;
+// };
+
+// /**
+//  * Smart audio segment downloader
+//  * Automatically chooses best method based on video length
+//  */
+// const downloadAudioSegment = (videoId, startTime, duration, totalDuration) => {
+//   return new Promise((resolve, reject) => {
+//     const timestamp = Date.now();
+//     const randomSuffix = Math.random().toString(36).substring(7);
+//     const outputPath = path.join(TEMP_DIR, `${videoId}_seg${Math.floor(startTime/600)}_${timestamp}_${randomSuffix}.mp3`);
+
+//     console.log(`📥 Downloading audio segment: ${startTime}s - ${Math.min(startTime + duration, totalDuration)}s`);
+
+//     // ✅ SMART DECISION: Check if we need full audio or just a segment
+//     const isShortVideo = totalDuration <= 600; // Video <= 10 minutes
+//     const isFirstSegment = startTime === 0;
+
+//     if (isShortVideo || (isFirstSegment && totalDuration <= 1200)) {
+//       // Case 1: Short video (< 10 mins) → Download full audio directly
+//       console.log(`   Strategy: Full audio download (video is ${Math.floor(totalDuration/60)}m ${totalDuration%60}s)`);
+//       downloadFullAudio(videoId, outputPath).then(resolve).catch(reject);
+//     } else {
+//       // Case 2: Long video → Download full, then extract segments
+//       console.log(`   Strategy: Download full, extract segment ${Math.floor(startTime/600)}`);
+//       downloadAndExtractSegment(videoId, startTime, duration, outputPath).then(resolve).catch(reject);
+//     }
+//   });
+// };
+
+// /**
+//  * Method 1: Download full audio (for short videos)
+//  */
+// const downloadFullAudio = (videoId, outputPath) => {
+//   return new Promise((resolve, reject) => {
+//     const ytdlp = spawn('yt-dlp', [
+//       '-x',
+//       '--audio-format', 'mp3',
+//       '--audio-quality', '9',
+//       '-o', outputPath,
+//       `https://www.youtube.com/watch?v=${videoId}`
+//     ]);
+
+//     let stderr = '';
+
+//     ytdlp.stdout.on('data', (data) => {
+//       const output = data.toString().trim();
+//       if (output.includes('100%') || output.includes('Destination') || output.includes('[ExtractAudio]')) {
+//         console.log(`   ${output}`);
+//       }
+//     });
+
+//     ytdlp.stderr.on('data', (data) => {
+//       stderr += data.toString();
+//     });
+
+//     ytdlp.on('close', (code) => {
+//       if (code === 0 && fs.existsSync(outputPath)) {
+//         const stats = fs.statSync(outputPath);
+//         const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
+//         console.log(`✅ Audio downloaded: ${fileSizeMB} MB`);
+//         resolve(outputPath);
+//       } else {
+//         console.error(`❌ yt-dlp failed with code ${code}`);
+//         if (stderr) console.error(`   Error: ${stderr.substring(0, 500)}`);
+//         reject(new Error('Failed to download audio'));
+//       }
+//     });
+
+//     ytdlp.on('error', (error) => {
+//       console.error(`❌ yt-dlp error:`, error.message);
+//       reject(error);
+//     });
+//   });
+// };
+
+// /**
+//  * Method 2: Download full audio then extract segment (for long videos)
+//  */
+// /**
+//  * Method 2: Download full audio ONCE then extract segments (for long videos)
+//  * Uses a persistent full audio file that's reused across segments
+//  */
+// const downloadAndExtractSegment = (videoId, startTime, duration, outputPath) => {
+//   return new Promise((resolve, reject) => {
+//     // ✅ Use a CONSISTENT filename for full audio (no timestamp/random)
+//     const fullAudioPath = path.join(TEMP_DIR, `${videoId}_full_audio.mp3`);
+
+//     // ✅ Check if full audio already exists
+//     if (fs.existsSync(fullAudioPath)) {
+//       console.log(`♻️  Reusing existing full audio: ${path.basename(fullAudioPath)}`);
+      
+//       // Check file size to ensure it's valid
+//       const stats = fs.statSync(fullAudioPath);
+//       if (stats.size > 1000) { // > 1KB means valid file
+//         extractSegmentWithFFmpeg(fullAudioPath, startTime, duration, outputPath, false)
+//           .then(resolve)
+//           .catch(reject);
+//         return;
+//       } else {
+//         console.log(`⚠️  Existing file is invalid (${stats.size} bytes), re-downloading...`);
+//         fs.unlinkSync(fullAudioPath);
+//       }
+//     }
+
+//     console.log(`📥 Downloading full audio (will be reused for other segments)...`);
+
+//     const ytdlp = spawn('yt-dlp', [
+//       '-x',
+//       '--audio-format', 'mp3',
+//       '--audio-quality', '9',
+//       '--no-playlist',
+//       '--no-warnings',
+//       '-o', fullAudioPath,
+//       `https://www.youtube.com/watch?v=${videoId}`
+//     ]);
+
+//     let stderr = '';
+//     let lastProgress = '';
+
+//     ytdlp.stdout.on('data', (data) => {
+//       const output = data.toString().trim();
+//       if (output.includes('%') && output !== lastProgress) {
+//         lastProgress = output;
+//         console.log(`   ${output}`);
+//       } else if (output.includes('Destination') || output.includes('[ExtractAudio]')) {
+//         console.log(`   ${output}`);
+//       }
+//     });
+
+//     ytdlp.stderr.on('data', (data) => {
+//       stderr += data.toString();
+//     });
+
+//     ytdlp.on('close', (code) => {
+//       if (code === 0 && fs.existsSync(fullAudioPath)) {
+//         const stats = fs.statSync(fullAudioPath);
+//         const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
+//         console.log(`✅ Full audio downloaded: ${fileSizeMB} MB (saved for reuse)`);
+        
+//         extractSegmentWithFFmpeg(fullAudioPath, startTime, duration, outputPath, false)
+//           .then(resolve)
+//           .catch(reject);
+//       } else {
+//         console.error(`❌ yt-dlp failed with code ${code}`);
+//         if (stderr) console.error(`   Error: ${stderr.substring(0, 500)}`);
+        
+//         // Cleanup partial download
+//         if (fs.existsSync(fullAudioPath)) {
+//           cleanupFile(fullAudioPath);
+//         }
+        
+//         reject(new Error('Failed to download full audio'));
+//       }
+//     });
+
+//     ytdlp.on('error', (error) => {
+//       console.error(`❌ yt-dlp error:`, error.message);
+//       reject(error);
+//     });
+//   });
+// };
+
+// /**
+//  * Cleanup full audio file after all segments are transcribed
+//  */
+// const cleanupFullAudio = (videoId) => {
+//   const fullAudioPath = path.join(TEMP_DIR, `${videoId}_full_audio.mp3`);
+//   if (fs.existsSync(fullAudioPath)) {
+//     const stats = fs.statSync(fullAudioPath);
+//     const sizeMB = (stats.size / (1024 * 1024)).toFixed(2);
+//     cleanupFile(fullAudioPath);
+//     console.log(`🗑️  Cleaned up full audio: ${sizeMB} MB freed`);
+//   }
+// };
+
+
+
+// /**
+//  * Extract specific segment from full audio using FFmpeg
+//  */
+// const extractSegmentWithFFmpeg = (fullAudioPath, startTime, duration, outputPath, cleanupAfter = false) => {
+//   return new Promise((resolve, reject) => {
+//     const ffmpeg = spawn('ffmpeg', [
+//       '-i', fullAudioPath,
+//       '-ss', startTime.toString(),
+//       '-t', duration.toString(),
+//       '-acodec', 'copy',
+//       '-y',
+//       outputPath
+//     ]);
+
+//     let ffmpegStderr = '';
+
+//     ffmpeg.stderr.on('data', (data) => {
+//       ffmpegStderr += data.toString();
+//     });
+
+//     ffmpeg.on('close', (code) => {
+//       // Cleanup full audio if requested (only after last segment)
+//       if (cleanupAfter) {
+//         setTimeout(() => cleanupFile(fullAudioPath), 2000);
+//       }
+
+//       if (fs.existsSync(outputPath)) {
+//         const stats = fs.statSync(outputPath);
+//         const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
+//         console.log(`✅ Audio segment extracted: ${fileSizeMB} MB`);
+//         resolve(outputPath);
+//       } else {
+//         console.error(`❌ FFmpeg failed with code ${code}`);
+//         if (ffmpegStderr) console.error(`   FFmpeg error:`, ffmpegStderr.substring(0, 500));
+        
+//         // If FFmpeg fails, return full audio as fallback
+//         console.log(`⚠️  FFmpeg extraction failed, using full audio as fallback`);
+//         if (fs.existsSync(fullAudioPath)) {
+//           resolve(fullAudioPath);
+//         } else {
+//           reject(new Error('Failed to extract audio segment'));
+//         }
+//       }
+//     });
+
+//     ffmpeg.on('error', (error) => {
+//       console.error(`❌ FFmpeg spawn error:`, error.message);
+//       reject(error);
+//     });
+//   });
+// };
+
+// /**
+//  * Convert audio file to Base64
+//  */
+// const audioToBase64 = (audioPath) => {
+//   try {
+//     const audioBuffer = fs.readFileSync(audioPath);
+//     const base64Audio = audioBuffer.toString('base64');
+//     console.log(`📦 Converted to Base64: ${(base64Audio.length / 1024).toFixed(2)} KB`);
+//     return base64Audio;
+//   } catch (error) {
+//     console.error('❌ Base64 conversion failed:', error.message);
+//     throw error;
+//   }
+// };
+
+// /**
+//  * Transcribe audio segment using Whisper
+//  */
+// const transcribeAudioSegment = (audioPath, model = 'tiny') => {
+//   return new Promise((resolve, reject) => {
+//     console.log(`🎙️ Transcribing segment with Whisper (${model})...`);
+    
+//     const whisper = spawn('whisper', [
+//       audioPath,
+//       '--model', model,
+//       '--language', 'en',
+//       '--output_format', 'txt',
+//       '--output_dir', TEMP_DIR,
+//       '--verbose', 'False'
+//     ]);
+
+//     let stderr = '';
+//     let stdout = '';
+
+//     whisper.stdout.on('data', (data) => {
+//       stdout += data.toString();
+//       const output = data.toString();
+//       if (output.includes('%')) {
+//         process.stdout.write(`\r   Progress: ${output.trim()}`);
+//       }
+//     });
+
+//     whisper.stderr.on('data', (data) => {
+//       stderr += data.toString();
+//     });
+
+//     whisper.on('close', (code) => {
+//       console.log('');
+      
+//       if (code === 0) {
+//         const baseName = path.basename(audioPath, path.extname(audioPath));
+//         const possiblePaths = [
+//           path.join(TEMP_DIR, `${baseName}.txt`),
+//           path.join(TEMP_DIR, baseName + '.txt')
+//         ];
+
+//         console.log(`🔍 Looking for transcript file...`);
+        
+//         let transcriptPath = null;
+//         for (const tryPath of possiblePaths) {
+//           if (fs.existsSync(tryPath)) {
+//             transcriptPath = tryPath;
+//             console.log(`   ✅ Found: ${path.basename(tryPath)}`);
+//             break;
+//           }
+//         }
+
+//         if (!transcriptPath) {
+//           const files = fs.readdirSync(TEMP_DIR);
+//           const txtFiles = files.filter(f => f.endsWith('.txt'));
+          
+//           if (txtFiles.length > 0) {
+//             const mostRecent = txtFiles
+//               .map(f => ({
+//                 name: f,
+//                 path: path.join(TEMP_DIR, f),
+//                 time: fs.statSync(path.join(TEMP_DIR, f)).mtimeMs
+//               }))
+//               .sort((a, b) => b.time - a.time)[0];
+            
+//             transcriptPath = mostRecent.path;
+//             console.log(`   Using most recent: ${mostRecent.name}`);
+//           }
+//         }
+        
+//         if (transcriptPath && fs.existsSync(transcriptPath)) {
+//           const transcription = fs.readFileSync(transcriptPath, 'utf-8');
+//           const wordCount = transcription.trim().split(/\s+/).length;
+//           console.log(`✅ Segment transcribed: ${transcription.length} chars, ${wordCount} words`);
+          
+//           cleanupFile(transcriptPath);
+//           resolve(transcription.trim());
+//         } else {
+//           console.error(`❌ Transcription file not found`);
+//           reject(new Error('Transcription file not found'));
+//         }
+//       } else {
+//         console.error(`❌ Whisper failed with code ${code}`);
+//         if (stderr) console.error(`   Error:`, stderr.substring(0, 500));
+//         reject(new Error('Whisper transcription failed'));
+//       }
+//     });
+
+//     whisper.on('error', (error) => {
+//       console.error(`❌ Whisper spawn error:`, error.message);
+//       reject(error);
+//     });
+//   });
+// };
+
+// /**
+//  * Main function: Download and transcribe a specific segment
+//  */
+// const transcribeSegment = async (videoId, segmentNumber, segmentDuration = 600, totalDuration = null) => {
+//   let audioPath = null;
+  
+//   try {
+//     const startTime = segmentNumber * segmentDuration;
+//     const actualDuration = totalDuration || 3600; // Default to 1 hour if not provided
+    
+//     console.log(`\n${'='.repeat(60)}`);
+//     console.log(`🎬 SEGMENT TRANSCRIPTION: Segment ${segmentNumber}`);
+//     console.log(`   Time range: ${Math.floor(startTime / 60)}:${String(startTime % 60).padStart(2, '0')} - ${Math.floor((startTime + segmentDuration) / 60)}:${String((startTime + segmentDuration) % 60).padStart(2, '0')}`);
+//     console.log(`${'='.repeat(60)}\n`);
+
+//     const startProcess = Date.now();
+
+//     // Step 1: Download segment audio (smart method selection)
+//     audioPath = await downloadAudioSegment(videoId, startTime, segmentDuration, actualDuration);
+    
+//     // Step 2: Convert to Base64
+//     const audioBase64 = audioToBase64(audioPath);
+    
+//     // Step 3: Transcribe
+//     const transcription = await transcribeAudioSegment(audioPath, 'tiny');
+    
+//     // Step 4: Clean up temp file
+//     if (fs.existsSync(audioPath)) {
+//       setTimeout(() => {
+//         cleanupFile(audioPath);
+//         console.log(`🗑️  Cleaned up temp audio file`);
+//       }, 2000);
+//     }
+    
+//     const totalTime = ((Date.now() - startProcess) / 1000).toFixed(1);
+//     console.log(`\n${'='.repeat(60)}`);
+//     console.log(`✅ SEGMENT ${segmentNumber} TRANSCRIPTION COMPLETE!`);
+//     console.log(`   Total time: ${totalTime}s`);
+//     console.log(`${'='.repeat(60)}\n`);
+    
+//     return {
+//       segment: segmentNumber,
+//       transcription,
+//       audioData: audioBase64,
+//       startTime,
+//       endTime: Math.min(startTime + segmentDuration, actualDuration)
+//     };
+    
+//   } catch (error) {
+//     if (audioPath && fs.existsSync(audioPath)) {
+//       setTimeout(() => cleanupFile(audioPath), 1000);
+//     }
+    
+//     console.error(`\n❌ SEGMENT ${segmentNumber} TRANSCRIPTION FAILED`);
+//     console.error(`   Error: ${error.message}\n`);
+//     throw error;
+//   }
+// };
+
+
+// module.exports = {
+//   transcribeSegment,
+//   cleanupFullAudio  // ✅ Add this
+// };
+
+
+
+
+
+const { spawn } = require('child_process');
+const path = require('path');
+const fs = require('fs');
+
+const TEMP_DIR = path.join(__dirname, '../temp');
+if (!fs.existsSync(TEMP_DIR)) {
+  fs.mkdirSync(TEMP_DIR, { recursive: true });
+}
+
+/**
+ * Helper: Safe file cleanup with retry
+ */
+const cleanupFile = (filePath) => {
+  if (!fs.existsSync(filePath)) return;
+  
+  let retries = 5;
+  while (retries > 0) {
+    try {
+      fs.unlinkSync(filePath);
+      return true;
+    } catch (err) {
+      retries--;
+      if (retries > 0) {
+        const start = Date.now();
+        while (Date.now() - start < 1000) {}
+      }
+    }
+  }
+  console.log(`⚠️  Could not delete ${path.basename(filePath)}, will be cleaned later`);
+  return false;
+};
+
+/**
+ * Smart audio segment downloader
+ * Automatically chooses best method based on video length
+ */
+const downloadAudioSegment = (videoId, startTime, duration, totalDuration) => {
+  return new Promise((resolve, reject) => {
+    const timestamp = Date.now();
+    const randomSuffix = Math.random().toString(36).substring(7);
+    const outputPath = path.join(TEMP_DIR, `${videoId}_seg${Math.floor(startTime/600)}_${timestamp}_${randomSuffix}.mp3`);
+
+    console.log(`📥 Downloading audio segment: ${startTime}s - ${Math.min(startTime + duration, totalDuration)}s`);
+
+    // ✅ SMART DECISION: Check if we need full audio or just a segment
+    const isShortVideo = totalDuration <= 600; // Video <= 10 minutes
+    const isFirstSegment = startTime === 0;
+
+    if (isShortVideo || (isFirstSegment && totalDuration <= 1200)) {
+      // Case 1: Short video (< 10 mins) → Download full audio directly
+      console.log(`   Strategy: Full audio download (video is ${Math.floor(totalDuration/60)}m ${totalDuration%60}s)`);
+      downloadFullAudio(videoId, outputPath).then(resolve).catch(reject);
+    } else {
+      // Case 2: Long video → Download full, then extract segments
+      console.log(`   Strategy: Download full, extract segment ${Math.floor(startTime/600)}`);
+      downloadAndExtractSegment(videoId, startTime, duration, outputPath).then(resolve).catch(reject);
+    }
+  });
+};
+
+/**
+ * Method 1: Download full audio (for short videos)
+ */
+const downloadFullAudio = (videoId, outputPath) => {
+  return new Promise((resolve, reject) => {
+    const ytdlp = spawn('yt-dlp', [
+      '-x',
+      '--audio-format', 'mp3',
+      '--audio-quality', '9',
+      '-o', outputPath,
+      `https://www.youtube.com/watch?v=${videoId}`
+    ]);
+
+    let stderr = '';
+
+    ytdlp.stdout.on('data', (data) => {
+      const output = data.toString().trim();
+      if (output.includes('100%') || output.includes('Destination') || output.includes('[ExtractAudio]')) {
+        console.log(`   ${output}`);
+      }
+    });
+
+    ytdlp.stderr.on('data', (data) => {
+      stderr += data.toString();
+    });
+
+    ytdlp.on('close', (code) => {
+      if (code === 0 && fs.existsSync(outputPath)) {
+        const stats = fs.statSync(outputPath);
+        const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
+        console.log(`✅ Audio downloaded: ${fileSizeMB} MB`);
+        resolve(outputPath);
+      } else {
+        console.error(`❌ yt-dlp failed with code ${code}`);
+        if (stderr) console.error(`   Error: ${stderr.substring(0, 500)}`);
+        reject(new Error('Failed to download audio'));
+      }
+    });
+
+    ytdlp.on('error', (error) => {
+      console.error(`❌ yt-dlp error:`, error.message);
+      reject(error);
+    });
+  });
+};
+
+/**
+ * Method 2: Download full audio then extract segment (for long videos)
+ */
+/**
+ * Method 2: Download full audio ONCE then extract segments (for long videos)
+ * Uses a persistent full audio file that's reused across segments
+ */
+const downloadAndExtractSegment = (videoId, startTime, duration, outputPath) => {
+  return new Promise((resolve, reject) => {
+    // ✅ Use a CONSISTENT filename for full audio (no timestamp/random)
+    const fullAudioPath = path.join(TEMP_DIR, `${videoId}_full_audio.mp3`);
+
+    // ✅ Check if full audio already exists
+    if (fs.existsSync(fullAudioPath)) {
+      console.log(`♻️  Reusing existing full audio: ${path.basename(fullAudioPath)}`);
+      
+      // Check file size to ensure it's valid
+      const stats = fs.statSync(fullAudioPath);
+      if (stats.size > 1000) { // > 1KB means valid file
+        extractSegmentWithFFmpeg(fullAudioPath, startTime, duration, outputPath, false)
+          .then(resolve)
+          .catch(reject);
+        return;
+      } else {
+        console.log(`⚠️  Existing file is invalid (${stats.size} bytes), re-downloading...`);
+        fs.unlinkSync(fullAudioPath);
+      }
+    }
+
+    console.log(`📥 Downloading full audio (will be reused for other segments)...`);
+
+    const ytdlp = spawn('yt-dlp', [
+      '-x',
+      '--audio-format', 'mp3',
+      '--audio-quality', '9',
+      '--no-playlist',
+      '--no-warnings',
+      '-o', fullAudioPath,
+      `https://www.youtube.com/watch?v=${videoId}`
+    ]);
+
+    let stderr = '';
+    let lastProgress = '';
+
+    ytdlp.stdout.on('data', (data) => {
+      const output = data.toString().trim();
+      if (output.includes('%') && output !== lastProgress) {
+        lastProgress = output;
+        console.log(`   ${output}`);
+      } else if (output.includes('Destination') || output.includes('[ExtractAudio]')) {
+        console.log(`   ${output}`);
+      }
+    });
+
+    ytdlp.stderr.on('data', (data) => {
+      stderr += data.toString();
+    });
+
+    ytdlp.on('close', (code) => {
+      if (code === 0 && fs.existsSync(fullAudioPath)) {
+        const stats = fs.statSync(fullAudioPath);
+        const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
+        console.log(`✅ Full audio downloaded: ${fileSizeMB} MB (saved for reuse)`);
+        
+        extractSegmentWithFFmpeg(fullAudioPath, startTime, duration, outputPath, false)
+          .then(resolve)
+          .catch(reject);
+      } else {
+        console.error(`❌ yt-dlp failed with code ${code}`);
+        if (stderr) console.error(`   Error: ${stderr.substring(0, 500)}`);
+        
+        // Cleanup partial download
+        if (fs.existsSync(fullAudioPath)) {
+          cleanupFile(fullAudioPath);
+        }
+        
+        reject(new Error('Failed to download full audio'));
+      }
+    });
+
+    ytdlp.on('error', (error) => {
+      console.error(`❌ yt-dlp error:`, error.message);
+      reject(error);
+    });
+  });
+};
+
+/**
+ * Cleanup full audio file after all segments are transcribed
+ */
+const cleanupFullAudio = (videoId) => {
+  const fullAudioPath = path.join(TEMP_DIR, `${videoId}_full_audio.mp3`);
+  if (fs.existsSync(fullAudioPath)) {
+    const stats = fs.statSync(fullAudioPath);
+    const sizeMB = (stats.size / (1024 * 1024)).toFixed(2);
+    cleanupFile(fullAudioPath);
+    console.log(`🗑️  Cleaned up full audio: ${sizeMB} MB freed`);
+  }
+};
+
+
+
+/**
+ * Extract specific segment from full audio using FFmpeg
+ */
+const extractSegmentWithFFmpeg = (fullAudioPath, startTime, duration, outputPath, cleanupAfter = false) => {
+  return new Promise((resolve, reject) => {
+    const ffmpeg = spawn('ffmpeg', [
+      '-i', fullAudioPath,
+      '-ss', startTime.toString(),
+      '-t', duration.toString(),
+      '-acodec', 'copy',
+      '-y',
+      outputPath
+    ]);
+
+    let ffmpegStderr = '';
+
+    ffmpeg.stderr.on('data', (data) => {
+      ffmpegStderr += data.toString();
+    });
+
+    ffmpeg.on('close', (code) => {
+      // Cleanup full audio if requested (only after last segment)
+      if (cleanupAfter) {
+        setTimeout(() => cleanupFile(fullAudioPath), 2000);
+      }
+
+      if (fs.existsSync(outputPath)) {
+        const stats = fs.statSync(outputPath);
+        const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
+        console.log(`✅ Audio segment extracted: ${fileSizeMB} MB`);
+        resolve(outputPath);
+      } else {
+        console.error(`❌ FFmpeg failed with code ${code}`);
+        if (ffmpegStderr) console.error(`   FFmpeg error:`, ffmpegStderr.substring(0, 500));
+        
+        // If FFmpeg fails, return full audio as fallback
+        console.log(`⚠️  FFmpeg extraction failed, using full audio as fallback`);
+        if (fs.existsSync(fullAudioPath)) {
+          resolve(fullAudioPath);
+        } else {
+          reject(new Error('Failed to extract audio segment'));
+        }
+      }
+    });
+
+    ffmpeg.on('error', (error) => {
+      console.error(`❌ FFmpeg spawn error:`, error.message);
+      reject(error);
+    });
+  });
+};
+
+/**
+ * Convert audio file to Base64
+ */
+const audioToBase64 = (audioPath) => {
+  try {
+    const audioBuffer = fs.readFileSync(audioPath);
+    const base64Audio = audioBuffer.toString('base64');
+    console.log(`📦 Converted to Base64: ${(base64Audio.length / 1024).toFixed(2)} KB`);
+    return base64Audio;
+  } catch (error) {
+    console.error('❌ Base64 conversion failed:', error.message);
+    throw error;
+  }
+};
+
+/**
+ * Transcribe audio segment using Whisper
+ */
+const transcribeAudioSegment = (audioPath, model = 'tiny') => {
+  return new Promise((resolve, reject) => {
+    console.log(`🎙️ Transcribing segment with Whisper (${model})...`);
+    
+    const whisper = spawn('whisper', [
+      audioPath,
+      '--model', model,
+      '--language', 'en',
+      '--output_format', 'txt',
+      '--output_dir', TEMP_DIR,
+      '--verbose', 'False'
+    ]);
+
+    let stderr = '';
+    let stdout = '';
+
+    whisper.stdout.on('data', (data) => {
+      stdout += data.toString();
+      const output = data.toString();
+      if (output.includes('%')) {
+        process.stdout.write(`\r   Progress: ${output.trim()}`);
+      }
+    });
+
+    whisper.stderr.on('data', (data) => {
+      stderr += data.toString();
+    });
+
+    whisper.on('close', (code) => {
+      console.log('');
+      
+      if (code === 0) {
+        const baseName = path.basename(audioPath, path.extname(audioPath));
+        const possiblePaths = [
+          path.join(TEMP_DIR, `${baseName}.txt`),
+          path.join(TEMP_DIR, baseName + '.txt')
+        ];
+
+        console.log(`🔍 Looking for transcript file...`);
+        
+        let transcriptPath = null;
+        for (const tryPath of possiblePaths) {
+          if (fs.existsSync(tryPath)) {
+            transcriptPath = tryPath;
+            console.log(`   ✅ Found: ${path.basename(tryPath)}`);
+            break;
+          }
+        }
+
+        if (!transcriptPath) {
+          const files = fs.readdirSync(TEMP_DIR);
+          const txtFiles = files.filter(f => f.endsWith('.txt'));
+          
+          if (txtFiles.length > 0) {
+            const mostRecent = txtFiles
+              .map(f => ({
+                name: f,
+                path: path.join(TEMP_DIR, f),
+                time: fs.statSync(path.join(TEMP_DIR, f)).mtimeMs
+              }))
+              .sort((a, b) => b.time - a.time)[0];
+            
+            transcriptPath = mostRecent.path;
+            console.log(`   Using most recent: ${mostRecent.name}`);
+          }
+        }
+        
+        if (transcriptPath && fs.existsSync(transcriptPath)) {
+          const transcription = fs.readFileSync(transcriptPath, 'utf-8');
+          const wordCount = transcription.trim().split(/\s+/).length;
+          console.log(`✅ Segment transcribed: ${transcription.length} chars, ${wordCount} words`);
+          
+          cleanupFile(transcriptPath);
+          resolve(transcription.trim());
+        } else {
+          console.error(`❌ Transcription file not found`);
+          reject(new Error('Transcription file not found'));
+        }
+      } else {
+        console.error(`❌ Whisper failed with code ${code}`);
+        if (stderr) console.error(`   Error:`, stderr.substring(0, 500));
+        reject(new Error('Whisper transcription failed'));
+      }
+    });
+
+    whisper.on('error', (error) => {
+      console.error(`❌ Whisper spawn error:`, error.message);
+      reject(error);
+    });
+  });
+};
+
+/**
+ * Main function: Download and transcribe a specific segment
+ */
+const transcribeSegment = async (videoId, segmentNumber, segmentDuration = 600, totalDuration = null) => {
+  let audioPath = null;
+  
+  try {
+    const startTime = segmentNumber * segmentDuration;
+    const actualDuration = totalDuration || 3600; // Default to 1 hour if not provided
+    
+    console.log(`\n${'='.repeat(60)}`);
+    console.log(`🎬 SEGMENT TRANSCRIPTION: Segment ${segmentNumber}`);
+    console.log(`   Time range: ${Math.floor(startTime / 60)}:${String(startTime % 60).padStart(2, '0')} - ${Math.floor((startTime + segmentDuration) / 60)}:${String((startTime + segmentDuration) % 60).padStart(2, '0')}`);
+    console.log(`${'='.repeat(60)}\n`);
+
+    const startProcess = Date.now();
+
+    // Step 1: Download segment audio (smart method selection)
+    audioPath = await downloadAudioSegment(videoId, startTime, segmentDuration, actualDuration);
+    
+    // Step 2: Convert to Base64
+    const audioBase64 = audioToBase64(audioPath);
+    
+    // Step 3: Transcribe
+    const transcription = await transcribeAudioSegment(audioPath, 'tiny');
+    
+    // Step 4: Clean up temp file
+    if (fs.existsSync(audioPath)) {
+      setTimeout(() => {
+        cleanupFile(audioPath);
+        console.log(`🗑️  Cleaned up temp audio file`);
+      }, 2000);
+    }
+    
+    const totalTime = ((Date.now() - startProcess) / 1000).toFixed(1);
+    console.log(`\n${'='.repeat(60)}`);
+    console.log(`✅ SEGMENT ${segmentNumber} TRANSCRIPTION COMPLETE!`);
+    console.log(`   Total time: ${totalTime}s`);
+    console.log(`${'='.repeat(60)}\n`);
+    
+    return {
+      segment: segmentNumber,
+      transcription,
+      audioData: audioBase64,
+      startTime,
+      endTime: Math.min(startTime + segmentDuration, actualDuration)
+    };
+    
+  } catch (error) {
+    if (audioPath && fs.existsSync(audioPath)) {
+      setTimeout(() => cleanupFile(audioPath), 1000);
+    }
+    
+    console.error(`\n❌ SEGMENT ${segmentNumber} TRANSCRIPTION FAILED`);
+    console.error(`   Error: ${error.message}\n`);
+    throw error;
+  }
+};
+
+
+module.exports = {
+  transcribeSegment,
+  cleanupFullAudio  // ✅ Add this
+};
+

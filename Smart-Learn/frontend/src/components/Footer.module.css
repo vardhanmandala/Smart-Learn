@@ -1,0 +1,41 @@
+.footer {
+  background: linear-gradient(90deg,#14151a 0%,#2f3136 95%);
+  color: #eee;
+  padding: 1.2rem 0 1.1rem 0;
+  box-shadow: 0 -1.5px 6px rgba(24,24,40,0.16);
+  width: 100vw;
+  bottom: 0;
+  text-align: center;
+}
+
+.footerContent {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.brand {
+  font-weight: 700;
+  font-size: 1.09rem;
+  letter-spacing: .02rem;
+  color: #8db8ff;
+}
+
+.socials {
+  display: flex;
+  gap: 1.05rem;
+  margin-top: 0.7rem;
+}
+
+.socials a {
+  color: #eee;
+  font-size: 1.4rem;
+  transition: color .17s, transform .2s;
+  text-decoration: none;
+}
+
+.socials a:hover {
+  color: #77c3fb;
+  transform: scale(1.19);
+}
